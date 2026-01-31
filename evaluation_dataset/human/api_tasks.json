@@ -1,0 +1,66 @@
+[
+  {
+    "name": "RAG.jsonl",
+    "path": "human/generation_tasks/RAG.jsonl",
+    "sha": "e377d437b4a3f0ecb276bd02c696fb8fc40588e9",
+    "size": 10195362,
+    "url": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/generation_tasks/RAG.jsonl?ref=main",
+    "html_url": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/generation_tasks/RAG.jsonl",
+    "git_url": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/e377d437b4a3f0ecb276bd02c696fb8fc40588e9",
+    "download_url": "https://raw.githubusercontent.com/IBM/mt-rag-benchmark/main/human/generation_tasks/RAG.jsonl",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/generation_tasks/RAG.jsonl?ref=main",
+      "git": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/e377d437b4a3f0ecb276bd02c696fb8fc40588e9",
+      "html": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/generation_tasks/RAG.jsonl"
+    }
+  },
+  {
+    "name": "README.md",
+    "path": "human/generation_tasks/README.md",
+    "sha": "c7a1e67b36305d552636bd5517fcd13d0dbe8c7e",
+    "size": 3191,
+    "url": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/generation_tasks/README.md?ref=main",
+    "html_url": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/generation_tasks/README.md",
+    "git_url": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/c7a1e67b36305d552636bd5517fcd13d0dbe8c7e",
+    "download_url": "https://raw.githubusercontent.com/IBM/mt-rag-benchmark/main/human/generation_tasks/README.md",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/generation_tasks/README.md?ref=main",
+      "git": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/c7a1e67b36305d552636bd5517fcd13d0dbe8c7e",
+      "html": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/generation_tasks/README.md"
+    }
+  },
+  {
+    "name": "reference+RAG.jsonl",
+    "path": "human/generation_tasks/reference+RAG.jsonl",
+    "sha": "42fe76992d7f7ebe97f02539fb6338a032173921",
+    "size": 5500112,
+    "url": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/generation_tasks/reference%2BRAG.jsonl?ref=main",
+    "html_url": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/generation_tasks/reference%2BRAG.jsonl",
+    "git_url": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/42fe76992d7f7ebe97f02539fb6338a032173921",
+    "download_url": "https://raw.githubusercontent.com/IBM/mt-rag-benchmark/main/human/generation_tasks/reference+RAG.jsonl",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/generation_tasks/reference%2BRAG.jsonl?ref=main",
+      "git": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/42fe76992d7f7ebe97f02539fb6338a032173921",
+      "html": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/generation_tasks/reference%2BRAG.jsonl"
+    }
+  },
+  {
+    "name": "reference.jsonl",
+    "path": "human/generation_tasks/reference.jsonl",
+    "sha": "dd75376677883644b96cd99780c7d03128063bd7",
+    "size": 7608375,
+    "url": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/generation_tasks/reference.jsonl?ref=main",
+    "html_url": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/generation_tasks/reference.jsonl",
+    "git_url": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/dd75376677883644b96cd99780c7d03128063bd7",
+    "download_url": "https://raw.githubusercontent.com/IBM/mt-rag-benchmark/main/human/generation_tasks/reference.jsonl",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/generation_tasks/reference.jsonl?ref=main",
+      "git": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/dd75376677883644b96cd99780c7d03128063bd7",
+      "html": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/generation_tasks/reference.jsonl"
+    }
+  }
+]

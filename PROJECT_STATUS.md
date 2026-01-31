@@ -12,27 +12,26 @@ A Retrieval-Augmented Generation (RAG) system using LangChain, OpenAI, and Qdran
 
 | Issue | Impact | Current Status |
 |-------|--------|----------------|
-| **Query Rewriting** | R@5 drops from 0.89 → 0.47 without it. With rewriting: 0.52 (+11%) | ❌ Not implemented |
-| **IDK Detection** | ~25% of questions are unanswerable. Models hallucinate badly | ❌ Not implemented |
-| **Conversation Memory** | Required for multi-turn context tracking | ❌ Not implemented |
-| **Retrieval k** | Paper uses k=5, we use k=4 | ⚠️ Needs update |
-| **Better Retrieval** | Elser + BGE outperforms basic embedding search | ⚠️ Basic only |
+| **Query Rewriting** | R@5 drops from 0.89 → 0.47 without it. With rewriting: 0.52 (+11%) | ✅ **Implemented** |
+| **IDK Detection** | ~25% of questions are unanswerable. Models hallucinate badly | ✅ **Implemented** |
+| **Conversation Memory** | Required for multi-turn context tracking | ✅ **Implemented** |
+| **Query Duplication** | Duplicating query improves retrieval weighting | ✅ **Implemented** |
+| **Retrieval k** | Paper uses k=5 | ✅ **Updated to k=5** |
 | **Long-form Answers** | FANC evaluation: Faithfulness, Appropriateness, Naturalness, Completeness | ⚠️ Needs tuning |
 
 ### Critical Quote from Paper
 > "Query rewriting is essential for multi-turn RAG. Without it, later turns with non-standalone
 > questions (e.g., 'When did that happen?') suffer dramatic performance degradation."
 
-### Unanswerable Questions
-- ~25% of mtRAG questions are unanswerable from retrieved context
-- Models must explicitly say "I don't know" rather than hallucinate
-- Current system: Always generates a response (hallucination risk)
+---
 
 ## Project Structure
 
 ```
 project/
 ├── main.py                    # CLI entry point with menu
+├── evaluation.py              # mtRAG evaluation script
+├── format_checker.py          # mtRAG format validation
 ├── drop_qdrant.py             # Script to clear Qdrant collection
 ├── loaders/
 │   └── document_loader.py     # JSONLLoader for JSONL datasets
@@ -40,41 +39,54 @@ project/
 │   └── qdrant.py              # Qdrant client & embeddings setup
 ├── workflow/
 │   ├── indexing.py            # load_doc(), store_doc()
-│   └── generation.py          # RAG query with context injection
-├── dataset/
-│   ├── clapnq.jsonl/          # French Revolution docs
-│   └── cloud.jsonl/           # IBM Cloud CDN docs
+│   ├── generation.py          # RAG with query rewriting + IDK detection
+│   └── memory.py              # ConversationMemory class
+├── evaluation_dataset/
+│   ├── human/                 # mtRAG test questions
+│   │   └── RAG.jsonl          # 842 tasks (205 IBM Cloud)
+│   └── cloud.jsonl/           # IBM Cloud corpus (101MB)
+├── predictions/
+│   └── ibmcloud_predictions.jsonl  # Our predictions (205 tasks)
 └── .env.example               # Environment variables template
 ```
 
-## Features
+---
+
+## Features Implemented
 
 ### 1. Document Loading (`loaders/document_loader.py`)
 - `JSONLLoader` class - loads JSONL files into LangChain Documents
-- `load_dataset()` - load by dataset name
+- Handles `document_id`, `text`, `url`, `domain` fields
 
 ### 2. Indexing (`workflow/indexing.py`)
-- `load_doc()` - loads all JSONL files from `dataset/` and splits them
-  - Chunk size: 1000 chars, overlap: 200 chars
+- `load_doc()` - loads all JSONL files and splits them
+- Chunk size: 1000 chars, overlap: 200 chars
 - `store_doc()` - stores documents in Qdrant with batch logging (batch_size=1000)
 
 ### 3. Vector Store (`vector_stores/qdrant.py`)
 - Connects to Qdrant at `http://localhost:6333` (Docker)
 - Uses `text-embedding-3-large` embeddings
 - Collection: `rag_documents`
-- `get_vector_store()` - returns QdrantVectorStore instance
 
 ### 4. Generation (`workflow/generation.py`)
-- `prompt_with_context()` - injects retrieved docs into prompt
-- `query(query, model)` - RAG query interface (retrieves k=4 docs)
+- ✅ **Query Rewriting**: LLM-based rewrite for multi-turn context
+- ✅ **IDK Detection**: Score threshold (0.5) for unanswerable questions
+- ✅ **Query Duplication**: `"query query"` for better retrieval
+- ✅ **Conversation Memory**: Tracks full history, uses last 5 for rewriting
+- ✅ **k=5 Retrieval**: Matches mtRAG paper setting
 
-### 5. CLI (`main.py`)
-```
-=== RAG System ===
-1. Chat with model    # Interactive RAG chat
-2. Process documents  # Index & store
-3. Exit
-```
+### 5. Memory (`workflow/memory.py`)
+- `ConversationMemory` class with window_size=5
+- Stores full conversation history
+- `get_context()` formats history for rewrite prompt
+
+### 6. Evaluation (`evaluation.py`)
+- Reads mtRAG RAG.jsonl format
+- Filters for IBM Cloud questions (matching indexed corpus)
+- Generates predictions in mtRAG format
+- Output includes `contexts` (with document_id, score, text) and `predictions`
+
+---
 
 ## Environment Variables (.env)
 ```
@@ -84,26 +96,148 @@ QDRANT_API_KEY=
 QDRANT_COLLECTION=rag_documents
 ```
 
+---
+
 ## Running
 
-### Start Qdrant (Docker)
+### Start Qdrant
 ```bash
-docker run -p 6333:6333 qdrant/qdrant
+docker run -d -p 6333:6333 qdrant/qdrant
 ```
 
-### Run the app
+### Interactive Chat
 ```bash
 uv run python main.py
+# Select 1. Chat with model
 ```
 
-### Reset data
+### Run Evaluation
 ```bash
-uv run python drop_qdrant.py
+uv run python evaluation.py \
+  evaluation_dataset/human/RAG.jsonl \
+  predictions/ibmcloud_predictions.jsonl
 ```
+
+### Format Check (mtRAG)
+```bash
+python format_checker.py \
+  --input_file evaluation_dataset/human/RAG.jsonl \
+  --prediction_file predictions/ibmcloud_predictions.jsonl \
+  --mode rag_taskc
+```
+
+---
 
 ## Current Stats
-- **255,850** raw documents
-- **409,470** chunks after splitting
+
+### Indexed Data
+| Dataset | Documents | Chunks |
+|---------|-----------|--------|
+| IBM Cloud (mtRAG corpus) | 101 MB file | ~???,??? chunks |
+
+### Evaluation Results
+| Metric | Value |
+|--------|-------|
+| Tasks processed | 205 (IBM Cloud only) |
+| Format | mtRAG compliant |
+| Time taken | ~1.5 hours |
+
+---
+
+## Format Checker Issues (⚠️)
+
+**Problem**: Input has 842 tasks, but we only predicted 205 (IBM Cloud subset).
+
+```
+Mismatch in number of instances: input=842, output=205
+637 missing task_id(s)
+```
+
+**Root Cause**: RAG.jsonl contains questions from **multiple datasets**:
+- IBM Cloud (ibmcld_xxx) → 205 tasks ✅
+- Clapnq (French Revolution) → Not indexed ❌
+- Govt, Fiqa → Not indexed ❌
+
+**Solution Options**:
+1. **Create subset input** - Evaluate only IBM Cloud tasks (current state)
+2. **Index all corpora** - Download and index all mtRAG datasets for full 842-task evaluation
+
+---
+
+## Completed Phases ✅
+
+### Phase 1: Query Rewriting ✅
+- ✅ Created `rewrite_query()` function using gpt-4o-mini
+- ✅ Added `ConversationMemory` class with window_size=5
+- ✅ Added `should_rewrite()` LLM judge
+- ✅ Updated retrieval to use rewritten query
+- ✅ Debug logging: `[Query Rewritten]` or `[Query Standalone]`
+
+### Phase 2: IDK Detection ✅
+- ✅ Added score threshold (0.5) using `similarity_search_with_score()`
+- ✅ IDK message: "The available documents don't contain information to answer..."
+- ✅ Debug logging: `[IDK: max_score < threshold]`
+- ✅ Saves IDK responses to memory for conversation continuity
+
+### Phase 3: k=5 Retrieval ✅
+- ✅ Updated from k=4 to k=5
+
+---
+
+## Current Work (2025-01-30)
+
+**Focus**: Phase 5 - Better Retrieval
+
+Currently designing hybrid retrieval improvements. Exploring options:
+- Simple: Qdrant native sparse (BM25) + score combination
+- Moderate: Sparse + Reciprocal Rank Fusion (RRF)
+- Advanced: Full hybrid + cross-encoder re-ranking
+
+---
+
+## Remaining Tasks
+
+### Phase 4: Full Dataset Coverage (DEFERRED)
+**Status**: User will download corpora later
+
+**Why**: Format checker requires predictions for all 842 tasks
+
+**Tasks**:
+- [ ] Download all mtRAG corpora: clapnq, govt, fiqa, ibmcloud
+- [ ] Index all corpora in Qdrant
+- [ ] Re-run evaluation on complete dataset
+
+**Estimated documents**:
+- Clapnq (French Revolution): ~?? chunks
+- Govt: ~?? chunks
+- Fiqa: ~?? chunks
+- IBM Cloud: already indexed
+
+### Phase 5: Better Retrieval (IN PROGRESS)
+**Why**: Hybrid retrieval (dense + sparse) outperforms basic embedding search
+
+**Current State**: Designing approach - choosing between:
+- Simple: Qdrant native BM25 + score combination
+- Moderate: Sparse + Reciprocal Rank Fusion (RRF)
+- Advanced: Full hybrid + cross-encoder re-ranking
+
+**Tasks**:
+- [x] Analyze current retrieval implementation
+- [ ] Design hybrid retrieval approach
+- [ ] Implement sparse retrieval layer
+- [ ] Implement score combination/RRF
+- [ ] Test on IBM Cloud evaluation set
+- [ ] Compare retrieval quality metrics
+
+### Phase 6: FANC Evaluation Tuning
+**Why**: mtRAG evaluates on Faithfulness, Appropriateness, Naturalness, Completeness
+
+**Tasks**:
+- [ ] Update generation prompt for longer, more complete answers
+- [ ] Add citations/references to retrieved context
+- [ ] Evaluate on FANC metrics using mtRAG script
+
+---
 
 ## Dependencies
 - langchain[openai] >= 1.2.6
@@ -111,56 +245,5 @@ uv run python drop_qdrant.py
 - langchain-openai >= 1.1.7
 - langchain-text-splitters >= 1.1.0
 - python-dotenv >= 1.0.0
+- tqdm >= 4.65.0
 - Python >= 3.13
-
----
-
-## Implementation Roadmap (mtRAG Preparation)
-
-### Phase 1: Query Rewriting (HIGHEST PRIORITY)
-**Why**: R@5 improves from 0.47 → 0.52 (+11%) on multi-turn queries
-
-**Tasks**:
-- [ ] Create `rewrite_query()` function using LLM
-- [ ] Add `ConversationMemory` class to track history
-- [ ] Update `query()` to pass history and use rewritten query for retrieval
-- [ ] Log original vs rewritten queries for debugging
-
-**Files to modify**:
-- `workflow/generation.py` - Add rewrite logic, ConversationMemory class
-
-### Phase 2: IDK Detection
-**Why**: ~25% of mtRAG questions are unanswerable; prevents hallucination
-
-**Tasks**:
-- [ ] Add IDK judge prompt/classifier
-- [ ] Check if answer is in retrieved context before generating
-- [ ] Return "I don't know" instead of hallucinating
-
-**Files to modify**:
-- `workflow/generation.py` - Add IDK detection before response generation
-
-### Phase 3: Increase Retrieval k
-**Why**: mtRAG paper uses k=5, we currently use k=4
-
-**Tasks**:
-- [ ] Change `similarity_search(k=4)` to `similarity_search(k=5)`
-
-**Files to modify**:
-- `workflow/generation.py` - Update k parameter
-
-### Phase 4: Better Retrieval (Optional)
-**Why**: Elser + BGE hybrid search outperforms basic embedding search
-
-**Tasks**:
-- [ ] Evaluate hybrid retrieval (dense + sparse)
-- [ ] Add re-ranking stage
-- [ ] Compare BM25 vs Elser for sparse retrieval
-
-### Phase 5: FANC Evaluation Tuning
-**Why**: mtRAG evaluates on Faithfulness, Appropriateness, Naturalness, Completeness
-
-**Tasks**:
-- [ ] Update generation prompt for longer, more complete answers
-- [ ] Add citations/references to retrieved context
-- [ ] Evaluate on FANC metrics

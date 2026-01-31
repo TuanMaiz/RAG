@@ -1,0 +1,66 @@
+[
+  {
+    "name": "RAG.json",
+    "path": "human/evaluations/RAG.json",
+    "sha": "72af71d96fae7708658dd2d4e3e9ee0aa7d015c9",
+    "size": 16936720,
+    "url": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/evaluations/RAG.json?ref=main",
+    "html_url": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/evaluations/RAG.json",
+    "git_url": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/72af71d96fae7708658dd2d4e3e9ee0aa7d015c9",
+    "download_url": "https://raw.githubusercontent.com/IBM/mt-rag-benchmark/main/human/evaluations/RAG.json",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/evaluations/RAG.json?ref=main",
+      "git": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/72af71d96fae7708658dd2d4e3e9ee0aa7d015c9",
+      "html": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/evaluations/RAG.json"
+    }
+  },
+  {
+    "name": "reference+RAG.json",
+    "path": "human/evaluations/reference+RAG.json",
+    "sha": "b3d23932f1b3867db5af679fd9730a4f13e0ebe1",
+    "size": 8879093,
+    "url": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/evaluations/reference%2BRAG.json?ref=main",
+    "html_url": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/evaluations/reference%2BRAG.json",
+    "git_url": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/b3d23932f1b3867db5af679fd9730a4f13e0ebe1",
+    "download_url": "https://raw.githubusercontent.com/IBM/mt-rag-benchmark/main/human/evaluations/reference+RAG.json",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/evaluations/reference%2BRAG.json?ref=main",
+      "git": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/b3d23932f1b3867db5af679fd9730a4f13e0ebe1",
+      "html": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/evaluations/reference%2BRAG.json"
+    }
+  },
+  {
+    "name": "reference.json",
+    "path": "human/evaluations/reference.json",
+    "sha": "750deb7bf5a10bdfa2e82f44a2bde27aac32eb67",
+    "size": 14768556,
+    "url": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/evaluations/reference.json?ref=main",
+    "html_url": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/evaluations/reference.json",
+    "git_url": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/750deb7bf5a10bdfa2e82f44a2bde27aac32eb67",
+    "download_url": "https://raw.githubusercontent.com/IBM/mt-rag-benchmark/main/human/evaluations/reference.json",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/evaluations/reference.json?ref=main",
+      "git": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/750deb7bf5a10bdfa2e82f44a2bde27aac32eb67",
+      "html": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/evaluations/reference.json"
+    }
+  },
+  {
+    "name": "reference_subset_with_human_evaluations.json",
+    "path": "human/evaluations/reference_subset_with_human_evaluations.json",
+    "sha": "f84e9dce11d8eaae9c441b3b5c56e9689e3ce36f",
+    "size": 2190566,
+    "url": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/evaluations/reference_subset_with_human_evaluations.json?ref=main",
+    "html_url": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/evaluations/reference_subset_with_human_evaluations.json",
+    "git_url": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/f84e9dce11d8eaae9c441b3b5c56e9689e3ce36f",
+    "download_url": "https://raw.githubusercontent.com/IBM/mt-rag-benchmark/main/human/evaluations/reference_subset_with_human_evaluations.json",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/IBM/mt-rag-benchmark/contents/human/evaluations/reference_subset_with_human_evaluations.json?ref=main",
+      "git": "https://api.github.com/repos/IBM/mt-rag-benchmark/git/blobs/f84e9dce11d8eaae9c441b3b5c56e9689e3ce36f",
+      "html": "https://github.com/IBM/mt-rag-benchmark/blob/main/human/evaluations/reference_subset_with_human_evaluations.json"
+    }
+  }
+]
