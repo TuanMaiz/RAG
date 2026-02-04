@@ -1,16 +1,25 @@
 """RAG generation with query rewriting for multi-turn conversations."""
 
+import os
+from dotenv import load_dotenv
+
 from langchain.agents.middleware import dynamic_prompt, ModelRequest
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
-from vector_stores.qdrant import get_vector_store
+from workflow.hybrid_retrieval import retrieve_with_scores as hybrid_retrieve
 from workflow.memory import ConversationMemory
 
+load_dotenv()
 
 # LLM for rewriting and judging (can use same as generation or cheaper model)
-_rewrite_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+_rewrite_llm = ChatOpenAI(
+    model=os.getenv("OPENAI_LLM_MODEL", "openai/gpt-4o-mini"),
+    temperature=0,
+    openai_api_base=os.getenv("OPENAI_BASE_URL"),
+    openai_api_key=os.getenv("OPENAI_API_KEY"),
+)
 
 # IDK Detection settings
 IDK_SCORE_THRESHOLD = 0.5
@@ -88,10 +97,10 @@ def duplicate_query(query: str) -> str:
 
 def retrieve_with_scores(query: str, history: list[dict[str, str]], k: int = 5):
     """
-    Retrieve documents with scores for IDK detection.
+    Retrieve documents with hybrid (dense + sparse) search for IDK detection.
 
     Returns:
-        tuple: (docs, max_score) where docs is list of (doc, score) tuples
+        tuple: (docs, max_score) where docs is list of Document objects
                and max_score is the highest similarity score
     """
     # Determine the query to use for retrieval
@@ -102,20 +111,11 @@ def retrieve_with_scores(query: str, history: list[dict[str, str]], k: int = 5):
     else:
         print(f"[Query Standalone] '{query}'")
 
-    # Duplicate for better retrieval
+    # Duplicate for better retrieval (still helps with hybrid)
     duplicated = duplicate_query(retrieval_query)
 
-    # Retrieve with scores
-    vector_store = get_vector_store()
-    results = vector_store.similarity_search_with_score(duplicated, k=k)
-
-    docs = [doc for doc, score in results]
-    scores = [score for doc, score in results]
-    max_score = max(scores) if scores else 0.0
-
-    print(f"[Retrieved {len(docs)} docs, max_score: {max_score:.3f}]")
-
-    return docs, max_score
+    # Use hybrid retrieval
+    return hybrid_retrieve(duplicated, history=None, k=k)
 
 
 @dynamic_prompt
