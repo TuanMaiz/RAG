@@ -10,6 +10,12 @@ from langchain_openai import ChatOpenAI
 
 from workflow.hybrid_retrieval import retrieve_with_scores as hybrid_retrieve
 from workflow.memory import ConversationMemory
+from workflow.prompts import (
+    IDK_MESSAGE,
+    QUERY_REWRITE_PROMPT,
+    REWRITE_JUDGE_PROMPT,
+    RAG_SYSTEM_PROMPT,
+)
 
 load_dotenv()
 
@@ -23,7 +29,6 @@ _rewrite_llm = ChatOpenAI(
 
 # IDK Detection settings
 IDK_SCORE_THRESHOLD = 0.5
-IDK_MESSAGE = "The available documents don't contain information to answer this question. Please try a different question about the topics covered in the documentation."
 
 
 def should_rewrite(query: str, history: list[dict[str, str]]) -> bool:
@@ -40,14 +45,10 @@ def should_rewrite(query: str, history: list[dict[str, str]]) -> bool:
         f"Q: {h['query']}\nA: {h['response']}" for h in history[-5:]
     )
 
-    prompt = f"""You are a judge. Determine if the current query needs context from previous turns to be understood.
-
-Chat history:
-{history_text}
-
-Current query: {query}
-
-Answer ONLY "yes" or "no". Does this query need context from previous turns?"""
+    prompt = REWRITE_JUDGE_PROMPT.format(
+        history_text=history_text,
+        query=query
+    )
 
     response = _rewrite_llm.invoke(prompt).content.strip().lower()
     return response.startswith("y")
@@ -67,19 +68,10 @@ def rewrite_query(query: str, history: list[dict[str, str]]) -> str:
         f"Q: {h['query']}\nA: {h['response']}" for h in history[-5:]
     )
 
-    prompt = f"""You are a query rewriter for a retrieval system. Rewrite the current query to be standalone and clear.
-
-Chat history:
-{history_text}
-
-Current query: {query}
-
-Rewrite the query to:
-- Replace pronouns (he, she, it, they, this, that) with the actual entities
-- Make it fully understandable without the chat history
-- Keep it concise and natural
-
-Return ONLY the rewritten query, nothing else."""
+    prompt = QUERY_REWRITE_PROMPT.format(
+        history_text=history_text,
+        query=query
+    )
 
     response = _rewrite_llm.invoke(prompt).content.strip()
     return response
@@ -133,9 +125,13 @@ def prompt_with_context(request: ModelRequest) -> str:
         f"[{i+1}] {doc.page_content}" for i, doc in enumerate(retrieved_docs)
     )
 
-    system_message = (
-        "You are a helpful assistant. Use the following context in your response:"
-        f"\n\n{docs_content}"
+    # Get the user question from state
+    messages = request.state.get("messages", [])
+    question = messages[-1].get("content", "") if messages else ""
+
+    system_message = RAG_SYSTEM_PROMPT.format(
+        docs_content=docs_content,
+        question=question
     )
 
     return system_message

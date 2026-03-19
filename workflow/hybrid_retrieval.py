@@ -87,20 +87,26 @@ def hybrid_search(
     # Prefetch: get top candidates from both dense and sparse
     prefetch = [
         models.Prefetch(
-            query=models.NamedVector(name="dense", vector=dense_vector),
+            query=dense_vector,
+            using="dense",
             limit=50,  # Get more candidates, then fuse
         ),
         models.Prefetch(
-            query=models.NamedSparseVector(name="sparse", vector=sparse_vector),
+            query=sparse_vector,
+            using="sparse",
             limit=50,
         ),
     ]
 
-    # Query with fusion (Reciprocal Rank Fusion)
+    # Query with fusion (Reciprocal Rank Fusion) with weights
+    # dense_weight controls semantic search influence, sparse_weight controls keyword search
     results = client.query_points(
         collection_name=COLLECTION_NAME,
         prefetch=prefetch,
-        query=models.FusionQuery(fusion=models.Fusion.RRF),  # RRF combines rankings
+        query=models.FusionQuery(
+            fusion=models.Fusion.RRF,
+            weights=[dense_weight, sparse_weight]  # [0.7, 0.3] by default
+        ),
         limit=k,
         with_payload=True,
         with_vectors=False,
@@ -109,7 +115,7 @@ def hybrid_search(
     # Convert to (doc, score) format
     # Extract text from payload
     output = []
-    for result in results:
+    for result in results.points:
         payload = result.payload or {}
         text = payload.get("page_content", "")
         # Create a simple document-like object

@@ -19,27 +19,44 @@ from workflow.generation import (
     IDK_MESSAGE,
     create_rag_agent,
 )
+from workflow.hybrid_retrieval import hybrid_search
 from workflow.memory import ConversationMemory
-from vector_stores.qdrant import get_vector_store
+from vector_stores.qdrant import COLLECTION_NAME, client
 from langchain_core.runnables import RunnableConfig
 
 
-def filter_ibmcloud_questions(input_file: str) -> list[dict]:
-    """Filter RAG.jsonl for IBM Cloud questions only."""
-    ibmcloud_tasks = []
+# Dataset prefixes for filtering
+DATASETS = {
+    "1": ("clapnq", "clapnq_"),
+    "2": ("cloud", "ibmcld_"),
+    "3": ("fiqa", "fiqa_"),
+    "4": ("govt", "govt_"),
+    "5": ("all", None),  # All datasets
+}
+
+
+def filter_tasks_by_prefix(input_file: str, prefix: str | None) -> list[dict]:
+    """Filter tasks by document_id prefix."""
+    tasks = []
 
     with open(input_file, 'r') as f:
         for line in f:
             data = json.loads(line)
-            # Check if any context has IBM Cloud document ID
-            has_ibmcld = any(
-                c['document_id'].startswith('ibmcld_')
+
+            # If no prefix (all datasets), include everything
+            if prefix is None:
+                tasks.append(data)
+                continue
+
+            # Check if any context has the matching prefix
+            has_matching_prefix = any(
+                c['document_id'].startswith(prefix)
                 for c in data.get('contexts', [])
             )
-            if has_ibmcld:
-                ibmcloud_tasks.append(data)
+            if has_matching_prefix:
+                tasks.append(data)
 
-    return ibmcloud_tasks
+    return tasks
 
 
 def generate_prediction(
@@ -48,6 +65,7 @@ def generate_prediction(
     memory: ConversationMemory,
 ) -> dict:
     """Generate prediction for a single task."""
+
     question = task_input["input"][0]["text"]
     history = memory.get_history()
 
@@ -59,23 +77,23 @@ def generate_prediction(
     # Duplicate for better retrieval
     duplicated = duplicate_query(retrieval_query)
 
-    # Retrieve with scores
-    vector_store = get_vector_store()
-    results = vector_store.similarity_search_with_score(duplicated, k=5)
+    # Hybrid search (dense + sparse with RRF fusion)
+    hybrid_results = hybrid_search(duplicated, k=5)
 
     # Build contexts with document_id and score
     contexts = []
     docs = []
-    for doc, score in results:
+    for doc, score in hybrid_results:
         doc_id = doc.metadata.get("document_id", doc.metadata.get("_id", "unknown"))
+        text = doc.page_content
         contexts.append({
             "document_id": doc_id,
-            "text": doc.page_content,
+            "text": text,
             "score": float(score),
         })
         docs.append(doc)
 
-    max_score = max([s for _, s in results]) if results else 0.0
+    max_score = max([score for _, score in hybrid_results]) if hybrid_results else 0.0
 
     # Generate prediction or IDK
     if max_score < IDK_SCORE_THRESHOLD:
@@ -106,13 +124,25 @@ def run_evaluation(
     input_file: str,
     output_file: str,
     model_name: str = "gpt-4o-mini",
+    dataset_choice: str = "5",
 ):
-    """Run evaluation on IBM Cloud questions."""
+    """Run evaluation on selected dataset.
+
+    Args:
+        input_file: Path to RAG.jsonl
+        output_file: Path for predictions output
+        model_name: LLM model to use
+        dataset_choice: 1-5 (1=clapnq, 2=cloud, 3=fiqa, 4=govt, 5=all)
+    """
     print(f"Reading input from: {input_file}")
 
-    # Filter for IBM Cloud questions
-    tasks = filter_ibmcloud_questions(input_file)
-    print(f"Found {len(tasks)} IBM Cloud tasks")
+    # Get prefix based on choice
+    _, prefix = DATASETS.get(dataset_choice, (None, None))
+
+    # Filter tasks by prefix
+    tasks = filter_tasks_by_prefix(input_file, prefix)
+    dataset_name = DATASETS[dataset_choice][0].upper()
+    print(f"Found {len(tasks)} {dataset_name} tasks")
 
     # Initialize model
     model = init_chat_model(model_name)
@@ -135,7 +165,7 @@ def run_evaluation(
         task_input = {
             "conversation_id": task["conversation_id"],
             "task_id": task["task_id"],
-            "Collection": "mt-rag-ibmcloud-elser-512-100-20240502",
+            "Collection": task.get("Collection", ""),
             "input": task["input"],
         }
 
@@ -164,15 +194,40 @@ def run_evaluation(
 
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: python evaluation.py <input.jsonl> <output.jsonl>")
-        print(f"\nExample: python evaluation.py evaluation_dataset/human/RAG.jsonl predictions/output.jsonl")
-        sys.exit(1)
+    # Default paths
+    input_file = "evaluation_dataset/human/RAG.jsonl"
+    output_file = "predictions/predictions.jsonl"
 
-    input_file = sys.argv[1]
-    output_file = sys.argv[2]
+    # Override with args if provided
+    if len(sys.argv) >= 2:
+        input_file = sys.argv[1]
+    if len(sys.argv) >= 3:
+        output_file = sys.argv[2]
 
-    run_evaluation(input_file, output_file)
+    # Dataset menu
+    print("\n" + "=" * 50)
+    print("mtRAG Evaluation")
+    print("=" * 50)
+    print("Select dataset to evaluate:")
+    print("  1. Clapnq (French Revolution)")
+    print("  2. Cloud (IBM Cloud)")
+    print("  3. Fiqa (Financial QA)")
+    print("  4. Govt (Government)")
+    print("  5. ALL datasets")
+    print("=" * 50)
+
+    choice = input("\nSelect option [1-5]: ").strip()
+    if choice not in DATASETS:
+        print("Invalid option. Defaulting to ALL datasets.")
+        choice = "5"
+
+    dataset_name = DATASETS[choice][0].upper()
+    print(f"\nRunning evaluation on: {dataset_name}")
+    print(f"Input:  {input_file}")
+    print(f"Output: {output_file}")
+    print()
+
+    run_evaluation(input_file, output_file, dataset_choice=choice)
 
 
 if __name__ == "__main__":

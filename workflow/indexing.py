@@ -49,34 +49,80 @@ def load_doc(dataset_dir: str | Path = "dataset") -> list[Document]:
     return all_splits
 
 
-def store_doc(docs: list[Document], batch_size: int = 300):
+def store_doc(docs: list[Document], batch_size: int = 350, resume: bool = True):
     """
     Store documents with hybrid (dense + sparse) vectors.
 
     Args:
         docs: List of Document objects to store
         batch_size: Number of documents to store per batch
+        resume: If True, continue from existing collection (don't delete)
     """
+    import json
+    from pathlib import Path
     from qdrant_client.http.models import PointStruct, SparseVector
 
-    # Ensure hybrid collection exists
-    if client.collection_exists(COLLECTION_NAME):
-        # Recreate with hybrid schema
-        client.delete_collection(COLLECTION_NAME)
-    create_hybrid_collection()
-
     total = len(docs)
+    progress_file = Path(".indexing_progress.json")
+    start_index = 0
+
+    # Resume: check existing collection
+    if resume and client.collection_exists(COLLECTION_NAME):
+        collection_info = client.get_collection(COLLECTION_NAME)
+        existing_count = collection_info.points_count
+
+        # Check if has sparse vectors (hybrid collection)
+        has_sparse = collection_info.config.params.sparse_vectors is not None
+
+        if existing_count > 0:
+            if has_sparse:
+                print(f"Resuming: collection has {existing_count} points with sparse vectors")
+                start_index = existing_count
+            else:
+                print(f"Warning: Collection has {existing_count} points but NO sparse vectors")
+                confirm = input("Delete and recreate with hybrid? (y/N): ").strip().lower()
+                if confirm == "y":
+                    client.delete_collection(COLLECTION_NAME)
+                    create_hybrid_collection()
+                else:
+                    print("Cannot resume - collection missing sparse vectors")
+                    return
+
+        if start_index >= total:
+            print(f"All {total} documents already indexed!")
+            return
+
+    # Create hybrid collection if needed
+    if not client.collection_exists(COLLECTION_NAME):
+        create_hybrid_collection()
+
+    # Save progress
+    def save_progress(current_index):
+        progress_file.write_text(json.dumps({
+            "total": total,
+            "indexed": current_index,
+            "timestamp": time.time()
+        }))
+
+    save_progress(0)
     start = time.time()
 
-    for i in range(0, total, batch_size):
+    for i in range(start_index, total, batch_size):
         batch = docs[i : i + batch_size]
         batch_start = time.time()
 
-        # Batch embeddings - much faster than one-by-one
+        # Batch embeddings
         texts = [doc.page_content for doc in batch]
         print(f"  Embedding {len(batch)} documents...", end="", flush=True)
-        dense_vectors = embeddings.embed_documents(texts)
-        print(f" done ({time.time() - batch_start:.1f}s)")
+        try:
+            dense_vectors = embeddings.embed_documents(texts)
+            print(f" done ({time.time() - batch_start:.1f}s)")
+        except Exception as e:
+            print(f" failed: {e}")
+            print("  Waiting 10s and retrying...")
+            time.sleep(10)
+            dense_vectors = embeddings.embed_documents(texts)
+            print(f"  Retry done ({time.time() - batch_start:.1f}s)")
 
         # Build points
         points = []
@@ -117,15 +163,25 @@ def store_doc(docs: list[Document], batch_size: int = 300):
                 break
             except Exception as e:
                 if retry == max_retries - 1:
+                    # Save progress before raising
+                    save_progress(i)
                     raise
-                print(f"  Retry {retry + 1}/{max_retries} after error: {e}")
+                print(f"  Retry {retry + 1}/{max_retries} after error: {str(e)[:50]}")
                 time.sleep(5)
         print(f"  Upserted in {time.time() - upsert_start:.1f}s")
 
+        # Save progress every batch
+        save_progress(i + len(batch))
+
         elapsed = time.time() - start
-        progress = min(i + batch_size, total) / total * 100
-        eta = (elapsed / (i + len(batch))) * (total - i - len(batch))
-        print(f"Stored {min(i + batch_size, total)}/{total} ({progress:.1f}%) - {elapsed:.1f}s - ETA: {eta/60:.1f}min")
+        progress = min(i + len(batch), total) / total * 100
+        eta = (elapsed / (i + len(batch) - start_index)) * (total - i - len(batch))
+        rate = (i + len(batch) - start_index) / elapsed * 60
+        print(f"Stored {min(i + len(batch), total)}/{total} ({progress:.1f}%) - {elapsed:.1f}s - ETA: {eta/60:.1f}min - Rate: {rate:.0f} docs/min")
+
+    # Delete progress file on completion
+    if progress_file.exists():
+        progress_file.unlink()
 
     print(f"Finished storing {total} hybrid documents in {time.time() - start:.2f}s")
 
