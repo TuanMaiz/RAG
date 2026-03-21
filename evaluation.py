@@ -7,17 +7,19 @@ Reads mtRAG RAG.jsonl format, runs our RAG system, outputs predictions.
 import json
 import sys
 from pathlib import Path
-from langchain.chat_models import init_chat_model
 from tqdm import tqdm
 
+from model import get_llm
+
 from workflow.generation import (
-    retrieve_with_scores,
+    retrieve_with_kg,
     should_rewrite,
     rewrite_query,
     duplicate_query,
     IDK_SCORE_THRESHOLD,
     IDK_MESSAGE,
     create_rag_agent,
+    ENABLE_KG,
 )
 from workflow.hybrid_retrieval import hybrid_search
 from workflow.memory import ConversationMemory
@@ -69,31 +71,32 @@ def generate_prediction(
     question = task_input["input"][0]["text"]
     history = memory.get_history()
 
-    # Determine retrieval query (with rewrite if needed)
-    retrieval_query = question
-    if history and should_rewrite(question, history):
-        retrieval_query = rewrite_query(question, history)
+    # Use KG-enhanced retrieval if enabled, otherwise use standard retrieval
+    if ENABLE_KG:
+        # retrieve_with_kg handles rewrite, duplicate, and fusion internally
+        docs, max_score = retrieve_with_kg(question, history, k=5)
+    else:
+        # Manual retrieval pipeline for non-KG mode
+        retrieval_query = question
+        if history and should_rewrite(question, history):
+            retrieval_query = rewrite_query(question, history)
 
-    # Duplicate for better retrieval
-    duplicated = duplicate_query(retrieval_query)
+        duplicated = duplicate_query(retrieval_query)
+        hybrid_results = hybrid_search(duplicated, k=5)
 
-    # Hybrid search (dense + sparse with RRF fusion)
-    hybrid_results = hybrid_search(duplicated, k=5)
+        docs = [doc for doc, _ in hybrid_results]
+        max_score = max([score for _, score in hybrid_results]) if hybrid_results else 0.0
 
     # Build contexts with document_id and score
     contexts = []
-    docs = []
-    for doc, score in hybrid_results:
+    for doc in docs:
         doc_id = doc.metadata.get("document_id", doc.metadata.get("_id", "unknown"))
         text = doc.page_content
         contexts.append({
             "document_id": doc_id,
             "text": text,
-            "score": float(score),
+            "score": float(max_score),  # Use shared max_score for all
         })
-        docs.append(doc)
-
-    max_score = max([score for _, score in hybrid_results]) if hybrid_results else 0.0
 
     # Generate prediction or IDK
     if max_score < IDK_SCORE_THRESHOLD:
@@ -145,7 +148,7 @@ def run_evaluation(
     print(f"Found {len(tasks)} {dataset_name} tasks")
 
     # Initialize model
-    model = init_chat_model(model_name)
+    model = get_llm(model_name)
 
     # Track conversations by conversation_id
     conversations = {}

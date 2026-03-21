@@ -1,4 +1,4 @@
-"""System prompts for RAG generation and query rewriting.
+"""System prompts for RAG generation, query rewriting, and knowledge graph extraction.
 
 These prompts are optimized for mtRAG FANC metrics:
 - Faithfulness: Citations required
@@ -6,6 +6,73 @@ These prompts are optimized for mtRAG FANC metrics:
 - Naturalness: Human-like responses
 - Completeness: Thorough answers
 """
+
+# ============================================================================
+# Knowledge Graph Extraction Prompts
+# ============================================================================
+
+# Entity extraction from text
+ENTITY_EXTRACTION_PROMPT = """Extract key entities from the text below.
+
+Analyze the text and identify important entities such as:
+- People (PERSON)
+- Organizations (ORG)
+- Locations (LOC)
+- Events (EVENT)
+- Concepts (CONCEPT)
+- Products/Services (PRODUCT)
+- Dates/Time periods (DATE)
+
+Text: {text}
+
+Return ONLY valid JSON with this exact format:
+{{"entities": [{{"name": "Entity Name", "type": "PERSON|ORG|LOC|EVENT|CONCEPT|PRODUCT|DATE"}}]}}
+
+Rules:
+- Extract only significant, specific entities
+- Use the most specific type possible
+- Return valid JSON only, no explanation
+"""
+
+# Relationship extraction between entities
+RELATIONSHIP_EXTRACTION_PROMPT = """Extract relationships between the entities in the text below.
+
+Entities found: {entities}
+
+Text: {text}
+
+Identify how these entities relate to each other. Common relationship types:
+- PARTICIPATED_IN (person → event)
+- LED (person → organization/group)
+- LOCATED_IN (entity → location)
+- HAPPENED_IN (event → location/date)
+- RELATED_TO (general association)
+- PART_OF (entity → larger entity)
+- CAUSED (entity → event/outcome)
+
+Return ONLY valid JSON with this exact format:
+{{"relationships": [{{"source": "Entity1", "target": "Entity2", "type": "RELATIONSHIP_TYPE"}}]}}
+
+Rules:
+- Only extract explicit relationships stated in the text
+- Use exact entity names from the provided list
+- Return valid JSON only, no explanation
+"""
+
+# Entity extraction from user query
+QUERY_ENTITY_PROMPT = """Extract key entities from this user query.
+
+Query: {query}
+
+Return ONLY valid JSON with this exact format:
+{{"entities": [{{"name": "Entity Name", "type": "PERSON|ORG|LOC|EVENT|CONCEPT|PRODUCT"}}]}}
+
+Focus on entities that would be useful for searching a knowledge graph.
+"""
+
+# ============================================================================
+# Existing RAG Prompts
+# ============================================================================
 
 # IDK Detection (when retrieval score is below threshold)
 IDK_MESSAGE = "I couldn't find relevant information in the available documents to answer this. Could you try rephrasing, or ask about a related topic covered in the documentation?"

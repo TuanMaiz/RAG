@@ -1,4 +1,4 @@
-from langchain.chat_models import init_chat_model
+from model import get_llm
 
 from vector_stores.qdrant import client, COLLECTION_NAME
 from workflow.generation import query
@@ -17,7 +17,7 @@ class Colors:
 
 def chat():
     """Chat with the RAG model."""
-    model = init_chat_model("gpt-4o-mini")
+    model = get_llm()
     memory = ConversationMemory(window_size=5)
 
     print(f"\n{Colors.YELLOW}--- Chat mode (type 'quit' to exit) ---{Colors.RESET}")

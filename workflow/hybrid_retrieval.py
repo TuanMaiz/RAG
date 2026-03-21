@@ -98,14 +98,13 @@ def hybrid_search(
         ),
     ]
 
-    # Query with fusion (Reciprocal Rank Fusion) with weights
+    # Query with fusion (Reciprocal Rank Fusion)
     # dense_weight controls semantic search influence, sparse_weight controls keyword search
     results = client.query_points(
         collection_name=COLLECTION_NAME,
         prefetch=prefetch,
         query=models.FusionQuery(
             fusion=models.Fusion.RRF,
-            weights=[dense_weight, sparse_weight]  # [0.7, 0.3] by default
         ),
         limit=k,
         with_payload=True,

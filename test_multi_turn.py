@@ -9,11 +9,12 @@ This script tests the Phase 1 & 2 implementation:
 """
 
 import os
-from langchain.chat_models import init_chat_model
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich import print as rprint
+
+from model import get_llm
 
 from workflow.generation import query
 from workflow.memory import ConversationMemory
@@ -270,7 +271,7 @@ def main():
     print(f"{Colors.YELLOW}Model:{Colors.RESET} gpt-4o-mini\n")
 
     # Initialize model
-    model = init_chat_model("gpt-4o-mini")
+    model = get_llm()
 
     # Run all test cases
     all_results = []

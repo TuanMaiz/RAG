@@ -12,6 +12,30 @@ dependencies = [
     "langchain-openai>=1.1.7",
     "langchain-core>=1.2.7",
     "langchain-qdrant>=1.1.0",
+    "neo4j>=5.0.0",
     "python-dotenv>=1.0.0",
     "rich>=14.3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+    "freezegun>=1.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--verbose --strict-markers --cov=. --cov-report=html --cov-report=term-missing"
+markers = [
+    "unit: fast, isolated tests",
+    "integration: tests with services",
+    "slow: tests that take time",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
 ]

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Retrieval-Augmented Generation (RAG) system competing in the mtRAG benchmark (TACL 2025 - Multi-Turn Conversational RAG). Uses LangChain, OpenRouter/OpenAI embeddings, and Qdrant vector store with **hybrid (dense + sparse) retrieval**.
+A Retrieval-Augmented Generation (RAG) system competing in the mtRAG benchmark (TACL 2025 - Multi-Turn Conversational RAG). Uses LangChain, OpenRouter/OpenAI embeddings, Qdrant vector store with **hybrid (dense + sparse) retrieval**, and **Neo4j knowledge graph** for entity-based retrieval enhancement.
 
 ## Common Commands
 
@@ -17,6 +17,13 @@ uv run python main.py
 **Start Qdrant (Docker):**
 ```bash
 docker run -d -p 6333:6333 qdrant/qdrant
+```
+
+**Start Neo4j (Docker):**
+```bash
+docker run -d -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/password \
+  neo4j:latest
 ```
 
 **Reset/clear the vector store:**
@@ -40,26 +47,55 @@ curl -s http://localhost:6333/collections/rag_documents | python -m json.tool
 
 Create `.env` from `.env.example`:
 ```
-OPENAI_API_KEY=sk-or-v1-...          # OpenRouter or OpenAI key
-OPENAI_BASE_URL=https://openrouter.ai/api/v1  # Or https://api.openai.com/v1
+# OpenAI / OpenRouter
+OPENAI_API_KEY=sk-or-v1-...
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
 OPENAI_EMBEDDING_MODEL=openai/text-embedding-3-small
 OPENAI_LLM_MODEL=openai/gpt-4o-mini
+
+# Qdrant Vector Store
 QDRANT_URL=http://localhost:6333
 QDRANT_COLLECTION=rag_documents
+
+# Neo4j Knowledge Graph
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=password
+NEO4J_DATABASE=neo4j
+ENABLE_KG=true
 ```
 
 **Note**: The system supports OpenRouter as a drop-in replacement for OpenAI. Set `OPENAI_BASE_URL` accordingly.
 
 ## Architecture
 
-### Hybrid Retrieval Data Flow
+### Complete RAG with Knowledge Graph Data Flow
 ```
 1. JSONL files (dataset/) → JSONLLoader → LangChain Documents
 2. Documents → RecursiveCharacterTextSplitter → Chunks (1000 chars, 200 overlap)
-3. Chunks → [Dense Embeddings + Sparse BM25] → Qdrant (hybrid collection)
-4. Query → [Rewrite (if needed)] → [Duplicate] → Hybrid Search (dense + sparse)
-5. Retrieved docs → LLM → Response (or IDK message)
+
+Indexing (parallel):
+├─ Chunks → [Dense + Sparse vectors] → Qdrant (with text in payload)
+└─ Chunks → LLM Entity Extraction → Neo4j (Entity nodes + MENTIONS relationships)
+
+Retrieval:
+├─ Query → [Rewrite] → [Duplicate] → Hybrid Search (dense + sparse) → Docs with TEXT
+└─ Query → Entity Extraction → Graph Search (Neo4j) → Document IDs
+                                          ↓
+                                  Fetch TEXT from Qdrant
+                                          ↓
+                                  Context Fusion (merge + deduplicate)
+                                          ↓
+                                  Format with [1], [2] citations
+                                          ↓
+                                  LLM → Response
 ```
+
+### Key Design: KG as Index
+
+- **Qdrant stores**: Vectors + **actual text in payload** (`page_content`)
+- **Neo4j stores**: Entity → Document links (index only)
+- **Citations work**: KG finds document_ids → Fetch text from Qdrant → LLM gets actual text
 
 ### Key Components
 
@@ -80,6 +116,30 @@ QDRANT_COLLECTION=rag_documents
 
 **`loaders/document_loader.py`**: `JSONLLoader` parses JSONL files expecting a `text` key, stores all other keys as metadata.
 
+### Knowledge Graph Components
+
+**`graph_stores/neo4j_client.py`**: Neo4j connection and basic CRUD operations.
+- `get_driver()` - Get connection singleton
+- `execute_query()` - Run Cypher queries
+- `merge_node()` - Create/update nodes
+- `create_relationship()` - Link nodes
+
+**`workflow/kg_extraction.py`**: LLM-based entity and relationship extraction.
+- `extract_entities()` - Extract entities from text
+- `extract_relationships()` - Extract relationships between entities
+- `extract_graph_data()` - Combined extraction
+- `extract_query_entities()` - Extract entities from user queries
+
+**`workflow/graph_retrieval.py`**: Graph-based document retrieval.
+- `graph_search()` - Main search, returns document IDs
+- `_find_documents_by_entity()` - Direct entity matching
+- `_expand_entities()` - Relationship traversal for entity expansion
+
+**`workflow/context_fusion.py`**: Merge vector and graph retrieval results.
+- `fetch_texts_from_qdrant()` - Fetch actual text by document IDs
+- `fuse_results()` - Merge and deduplicate vector + graph results
+- `format_for_llm()` - Format with [1], [2] citation markers
+
 ### Hybrid Collection Schema
 
 Qdrant collection uses named vectors:
@@ -87,6 +147,27 @@ Qdrant collection uses named vectors:
 - `sparse`: BM25-style sparse vectors with IDF modifier
 
 Points are upserted with both vector types in a single call for hybrid search.
+
+### Neo4j Schema
+
+```cypher
+// Entity node (LLM-extracted types)
+(:Entity {
+  name: "Napoleon Bonaparte",
+  type: "PERSON",           // PERSON, ORG, LOC, EVENT, CONCEPT, PRODUCT, DATE
+  domain: "clapnq"           // Dataset source: clapnq, cloud, fiqa, govt
+})
+
+// Document node (links to Qdrant point IDs)
+(:Document {
+  id: "123",                 // Matches Qdrant point ID
+  domain: "clapnq"
+})
+
+// Relationships
+(:Document)-[:MENTIONS]->(:Entity)
+(:Entity)-[:RELATED_TO]->(:Entity)
+```
 
 ### mtRAG Benchmark Context
 
@@ -105,6 +186,8 @@ Current implementation status in `PROJECT_STATUS.md`.
 - **Batch size**: Default 350, adjustable via parameter
 - **Auto-retry**: Embedding API failures trigger 10s wait + retry
 - **Sparse vectors**: Computed locally via simple tokenization (no external model)
+- **KG indexing**: When `ENABLE_KG=true`, extracts entities via LLM and stores to Neo4j during indexing
+- **Graceful degradation**: If Neo4j is down, Qdrant indexing continues without error
 
 ## Datasets
 
@@ -115,3 +198,47 @@ Located in `dataset/`:
 - `govt.jsonl` (108 MB) - Government documents
 
 Total: ~622k chunks after splitting.
+
+## Testing
+
+**Quick KG integration test:**
+```bash
+uv run python test_kg.py
+```
+
+**Run KG comparison evaluation:**
+```bash
+uv run python compare_kg_evaluation.py
+# Select dataset to compare with/without KG
+```
+
+**Check Neo4j data:**
+```bash
+# Count entities
+uv run python -c "
+from graph_stores.neo4j_client import execute_query
+result = execute_query('MATCH (e:Entity) RETURN count(e) as count')
+print(f'Entities: {result[0][\"count\"]}')
+"
+```
+
+**Test individual components:**
+```bash
+# Entity extraction
+uv run python -c "
+from workflow.kg_extraction import extract_graph_data
+print(extract_graph_data('Napoleon led the French army.', 'clapnq'))
+"
+
+# Graph retrieval
+uv run python -c "
+from workflow.graph_retrieval import graph_search
+print(graph_search('Who was Napoleon?', domain='clapnq', k=5))
+"
+
+# Context fusion
+uv run python -c "
+from workflow.context_fusion import fetch_texts_from_qdrant
+print(fetch_texts_from_qdrant([1]))
+"
+```

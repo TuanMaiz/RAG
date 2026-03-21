@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 
@@ -12,6 +13,104 @@ from vector_stores.qdrant import (
     embeddings,
 )
 from workflow.hybrid_retrieval import sparse_vector_from_text
+
+# KG indexing flag
+ENABLE_KG = os.getenv("ENABLE_KG", "true").lower() == "true"
+
+
+def extract_domain(source_path: str) -> str:
+    """Extract domain name from source file path.
+
+    The domain is determined by the dataset filename.
+
+    Examples:
+        dataset/clapnq.jsonl/clapnq.jsonl → clapnq
+        dataset/cloud.jsonl/cloud.jsonl → cloud
+        dataset/fiqa.jsonl/fiqa.jsonl → fiqa
+        dataset/govt.jsonl/govt.jsonl → govt
+
+    Args:
+        source_path: Path to the source file
+
+    Returns:
+        Domain name (lowercase)
+    """
+    path = Path(source_path)
+    # Get filename without extension, then get parent folder name
+    # For path like "dataset/cloud.jsonl/cloud.jsonl", we want "cloud"
+    filename = path.stem  # e.g., "cloud.jsonl"
+    # Remove .jsonl if present and get base name
+    if filename.endswith(".jsonl"):
+        filename = filename[:-6]  # Remove ".jsonl" (6 chars)
+    return filename.lower()
+
+
+def store_entities_to_graph(
+    doc_id: int,
+    text: str,
+    domain: str,
+) -> bool:
+    """Extract entities from text and store in Neo4j.
+
+    Creates Document node, Entity nodes, and MENTIONS relationships.
+    Also creates relationships between entities.
+
+    Args:
+        doc_id: Qdrant point ID (also Document node ID in Neo4j)
+        text: Document text to extract entities from
+        domain: Dataset domain (clapnq, cloud, fiqa, govt)
+
+    Returns:
+        True if successful or KG disabled, False on error
+    """
+    if not ENABLE_KG:
+        return True  # KG disabled, skip gracefully
+
+    from graph_stores.neo4j_client import get_driver, merge_node, create_relationship
+    from workflow.kg_extraction import extract_graph_data
+
+    driver = get_driver()
+    if driver is None:
+        return False  # KG connection failed
+
+    try:
+        # Extract entities and relationships
+        graph_data = extract_graph_data(text, domain)
+
+        if not graph_data["entities"]:
+            return True  # No entities found, but not an error
+
+        # Create/update Document node
+        merge_node("Document", {"id": str(doc_id), "domain": domain})
+
+        # Create/update Entity nodes and MENTIONS relationships
+        for entity in graph_data["entities"]:
+            merge_node("Entity", {
+                "name": entity["name"],
+                "type": entity["type"],
+                "domain": domain
+            })
+
+            # Link Document to Entity
+            create_relationship(
+                "Document", {"id": str(doc_id)},
+                "Entity", {"name": entity["name"], "domain": domain},
+                "MENTIONS"
+            )
+
+        # Store relationships between entities
+        for rel in graph_data.get("relationships", []):
+            create_relationship(
+                "Entity", {"name": rel["source"], "domain": domain},
+                "Entity", {"name": rel["target"], "domain": domain},
+                rel["type"]
+            )
+
+        return True
+
+    except Exception as e:
+        print(f"Warning: Failed to store entities for doc {doc_id}: {e}")
+        return False
 
 
 def load_doc(dataset_dir: str | Path = "dataset") -> list[Document]:
@@ -137,6 +236,11 @@ def store_doc(docs: list[Document], batch_size: int = 350, resume: bool = True):
                 "page_content": doc.page_content,
                 **doc.metadata,
             }
+
+            # Store entities to Neo4j knowledge graph
+            if ENABLE_KG:
+                domain = extract_domain(doc.metadata.get("source", ""))
+                store_entities_to_graph(doc_id, doc.page_content, domain)
 
             point = PointStruct(
                 id=doc_id,
