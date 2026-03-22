@@ -1,30 +1,93 @@
 """Knowledge Graph entity and relationship extraction using LLM.
 
 This module extracts entities and relationships from text using LLM prompts.
+Uses LightRAG-inspired delimited format to avoid JSON parsing issues.
 """
 
-import json
 import os
 from typing import Any
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
+from utils.logging_config import get_logger
 from workflow.prompts import (
-    ENTITY_EXTRACTION_PROMPT,
-    RELATIONSHIP_EXTRACTION_PROMPT,
-    QUERY_ENTITY_PROMPT,
+    TUPLE_DELIMITER,
+    COMPLETION_DELIMITER,
+    format_entity_prompt,
+    format_relationship_prompt,
+    format_query_prompt,
 )
 
 load_dotenv()
 
+logger = get_logger(__name__)
+
 # LLM for extraction (can use cheaper/faster model)
+# max_tokens=4096 to handle longer entity lists
 _extraction_llm = ChatOpenAI(
-    model=os.getenv("OPENAI_LLM_MODEL", "openai/gpt-4o-mini"),
+    model=os.getenv("OPENAI_KG_MODEL", os.getenv("OPENAI_LLM_MODEL", "openai/gpt-4o-mini")),
     temperature=0,
+    max_tokens=4096,
     openai_api_base=os.getenv("OPENAI_BASE_URL"),
     openai_api_key=os.getenv("OPENAI_API_KEY"),
 )
+
+
+def _parse_delimited_output(content: str) -> dict[str, Any]:
+    """Parse LightRAG-style delimited output.
+
+    Expected format:
+    entity{delimiter}name{delimiter}type{delimiter}description
+    relation{delimiter}source{delimiter}target{delimiter}keywords{delimiter}description
+    ...
+    {completion_delimiter}
+    """
+    entities = []
+    relationships = []
+
+    lines = content.strip().split('\n')
+    completion_found = False
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Check for completion signal
+        if COMPLETION_DELIMITER in line:
+            completion_found = True
+            break
+
+        # Split by delimiter
+        parts = line.split(TUPLE_DELIMITER)
+
+        if len(parts) < 2:
+            continue
+
+        entry_type = parts[0].strip()
+
+        if entry_type == "entity" and len(parts) >= 4:
+            # entity{delimiter}name{delimiter}type{delimiter}description
+            entities.append({
+                "name": parts[1].strip(),
+                "type": parts[2].strip().upper(),
+                "description": parts[3].strip() if len(parts) > 3 else "",
+            })
+        elif entry_type == "relation" and len(parts) >= 5:
+            # relation{delimiter}source{delimiter}target{delimiter}keywords{delimiter}description
+            relationships.append({
+                "source": parts[1].strip(),
+                "target": parts[2].strip(),
+                "type": parts[3].strip(),  # keywords stored as type
+                "description": parts[4].strip() if len(parts) > 4 else "",
+            })
+
+    return {
+        "entities": entities,
+        "relationships": relationships,
+        "complete": completion_found,
+    }
 
 
 def extract_entities(text: str, domain: str = None) -> list[dict[str, str]]:
@@ -35,34 +98,33 @@ def extract_entities(text: str, domain: str = None) -> list[dict[str, str]]:
         domain: Optional domain hint (clapnq, cloud, fiqa, govt)
 
     Returns:
-        List of entities with name and type
+        List of entities with name, type, and description
     """
     if not text or len(text.strip()) < 10:
         return []
 
-    prompt = ENTITY_EXTRACTION_PROMPT.format(text=text)
+    prompt = format_entity_prompt(text)
 
     try:
         response = _extraction_llm.invoke(prompt)
         content = response.content.strip()
 
-        # Parse JSON response
-        result = json.loads(content)
+        # Parse delimited output
+        result = _parse_delimited_output(content)
         entities = result.get("entities", [])
 
         # Add domain if provided
-        if domain:
-            for entity in entities:
+        for entity in entities:
+            if domain:
                 entity["domain"] = domain
+
+        if not result.get("complete"):
+            logger.warning("Entity extraction may be incomplete (no completion delimiter)")
 
         return entities
 
-    except json.JSONDecodeError as e:
-        print(f"Warning: Failed to parse entity extraction JSON: {e}")
-        print(f"Response was: {content[:200]}")
-        return []
     except Exception as e:
-        print(f"Warning: Entity extraction failed: {e}")
+        logger.warning("Entity extraction failed: %s", e)
         return []
 
 
@@ -82,28 +144,23 @@ def extract_relationships(
     if not entities or len(entities) < 2:
         return []
 
-    # Format entities for the prompt
-    entity_list = ", ".join([f"{e['name']} ({e.get('type', 'UNKNOWN')})" for e in entities])
-
-    prompt = RELATIONSHIP_EXTRACTION_PROMPT.format(
-        entities=entity_list,
-        text=text,
-    )
+    prompt = format_relationship_prompt(text, entities)
 
     try:
         response = _extraction_llm.invoke(prompt)
         content = response.content.strip()
 
-        # Parse JSON response
-        result = json.loads(content)
-        return result.get("relationships", [])
+        # Parse delimited output
+        result = _parse_delimited_output(content)
+        relationships = result.get("relationships", [])
 
-    except json.JSONDecodeError as e:
-        print(f"Warning: Failed to parse relationship extraction JSON: {e}")
-        print(f"Response was: {content[:200]}")
-        return []
+        if not result.get("complete"):
+            logger.warning("Relationship extraction may be incomplete (no completion delimiter)")
+
+        return relationships
+
     except Exception as e:
-        print(f"Warning: Relationship extraction failed: {e}")
+        logger.warning("Relationship extraction failed: %s", e)
         return []
 
 
@@ -145,20 +202,20 @@ def extract_query_entities(query: str) -> list[dict[str, str]]:
     if not query:
         return []
 
-    prompt = QUERY_ENTITY_PROMPT.format(query=query)
+    prompt = format_query_prompt(query)
 
     try:
         response = _extraction_llm.invoke(prompt)
         content = response.content.strip()
 
-        result = json.loads(content)
-        return result.get("entities", [])
+        # Parse delimited output
+        result = _parse_delimited_output(content)
+        entities = result.get("entities", [])
 
-    except json.JSONDecodeError as e:
-        print(f"Warning: Failed to parse query entity extraction JSON: {e}")
-        return []
+        return entities
+
     except Exception as e:
-        print(f"Warning: Query entity extraction failed: {e}")
+        logger.warning("Query entity extraction failed: %s", e)
         return []
 
 
@@ -197,6 +254,8 @@ if __name__ == "__main__":
     print(f"\nFound {len(result['entities'])} entities:")
     for entity in result["entities"]:
         print(f"  - {entity['name']} ({entity['type']})")
+        if entity.get('description'):
+            print(f"    {entity['description']}")
 
     print(f"\nFound {len(result['relationships'])} relationships:")
     for rel in result["relationships"]:

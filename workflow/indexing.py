@@ -4,18 +4,22 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from tqdm import tqdm
 
 from loaders.document_loader import JSONLLoader
+from utils.logging_config import get_logger
 from vector_stores.qdrant import (
     COLLECTION_NAME,
     client,
     create_hybrid_collection,
-    embeddings,
+    get_embeddings,
 )
 from workflow.hybrid_retrieval import sparse_vector_from_text
 
 # KG indexing flag
 ENABLE_KG = os.getenv("ENABLE_KG", "true").lower() == "true"
+
+logger = get_logger(__name__)
 
 
 def extract_domain(source_path: str) -> str:
@@ -109,16 +113,18 @@ def store_entities_to_graph(
         return True
 
     except Exception as e:
-        print(f"Warning: Failed to store entities for doc {doc_id}: {e}")
+        logger.warning("Failed to store entities for doc %d: %s", doc_id, e)
         return False
 
 
-def load_doc(dataset_dir: str | Path = "dataset") -> list[Document]:
+def load_doc(dataset_dir: str | Path = "dataset", dataset_name: str | None = None) -> list[Document]:
     """
-    Index all documents from JSONL files in the dataset directory.
+    Index documents from JSONL files in the dataset directory.
 
     Args:
         dataset_dir: Base directory containing datasets
+        dataset_name: Optional specific dataset to load (e.g., "clapnq", "cloud").
+                     If None, loads all datasets.
 
     Returns:
         List of split Document objects
@@ -130,6 +136,16 @@ def load_doc(dataset_dir: str | Path = "dataset") -> list[Document]:
 
     if not jsonl_files:
         return []
+
+    # Filter by dataset name if specified
+    if dataset_name:
+        jsonl_files = [p for p in jsonl_files if dataset_name.lower() in p.name.lower()]
+
+    if not jsonl_files:
+        logger.warning("No files found for dataset: %s", dataset_name)
+        return []
+
+    logger.info("Found %d file(s): %s", len(jsonl_files), [f.name for f in jsonl_files])
 
     all_documents = []
     for jsonl_path in jsonl_files:
@@ -175,7 +191,7 @@ def store_doc(docs: list[Document], batch_size: int = 350, resume: bool = True):
 
         if existing_count > 0:
             if has_sparse:
-                print(f"Resuming: collection has {existing_count} points with sparse vectors")
+                print(f"Resuming from {existing_count} documents")
                 start_index = existing_count
             else:
                 print(f"Warning: Collection has {existing_count} points but NO sparse vectors")
@@ -206,86 +222,87 @@ def store_doc(docs: list[Document], batch_size: int = 350, resume: bool = True):
     save_progress(0)
     start = time.time()
 
-    for i in range(start_index, total, batch_size):
-        batch = docs[i : i + batch_size]
-        batch_start = time.time()
+    # Calculate number of batches
+    num_batches = (total - start_index + batch_size - 1) // batch_size
 
-        # Batch embeddings
-        texts = [doc.page_content for doc in batch]
-        print(f"  Embedding {len(batch)} documents...", end="", flush=True)
-        try:
-            dense_vectors = embeddings.embed_documents(texts)
-            print(f" done ({time.time() - batch_start:.1f}s)")
-        except Exception as e:
-            print(f" failed: {e}")
-            print("  Waiting 10s and retrying...")
-            time.sleep(10)
-            dense_vectors = embeddings.embed_documents(texts)
-            print(f"  Retry done ({time.time() - batch_start:.1f}s)")
+    # Progress bar with tqdm
+    with tqdm(total=total - start_index, desc="Indexing", unit="doc",
+              initial=start_index, ncols=100) as pbar:
+        for i in range(start_index, total, batch_size):
+            batch = docs[i : i + batch_size]
+            batch_start = time.time()
 
-        # Build points
-        points = []
-        for idx, doc in enumerate(batch):
-            doc_id = i + idx
-
-            # Sparse vector (BM25-style)
-            sparse_vector = sparse_vector_from_text(doc.page_content)
-
-            # Build payload
-            payload = {
-                "page_content": doc.page_content,
-                **doc.metadata,
-            }
-
-            # Store entities to Neo4j knowledge graph
-            if ENABLE_KG:
-                domain = extract_domain(doc.metadata.get("source", ""))
-                store_entities_to_graph(doc_id, doc.page_content, domain)
-
-            point = PointStruct(
-                id=doc_id,
-                vector={
-                    "dense": dense_vectors[idx],
-                    "sparse": SparseVector(
-                        indices=sparse_vector.indices,
-                        values=sparse_vector.values,
-                    ),
-                },
-                payload=payload,
-            )
-            points.append(point)
-
-        # Batch upsert with retry
-        upsert_start = time.time()
-        max_retries = 5
-        for retry in range(max_retries):
+            # Batch embeddings
+            texts = [doc.page_content for doc in batch]
             try:
-                client.upsert(
-                    collection_name=COLLECTION_NAME,
-                    points=points,
-                )
-                break
+                dense_vectors = get_embeddings().embed_documents(texts)
             except Exception as e:
-                if retry == max_retries - 1:
-                    # Save progress before raising
-                    save_progress(i)
-                    raise
-                print(f"  Retry {retry + 1}/{max_retries} after error: {str(e)[:50]}")
-                time.sleep(5)
-        print(f"  Upserted in {time.time() - upsert_start:.1f}s")
+                pbar.set_postfix_str("Retrying...")
+                time.sleep(10)
+                dense_vectors = get_embeddings().embed_documents(texts)
 
-        # Save progress every batch
-        save_progress(i + len(batch))
+            # Build points
+            points = []
+            for idx, doc in enumerate(batch):
+                doc_id = i + idx
 
-        elapsed = time.time() - start
-        progress = min(i + len(batch), total) / total * 100
-        eta = (elapsed / (i + len(batch) - start_index)) * (total - i - len(batch))
-        rate = (i + len(batch) - start_index) / elapsed * 60
-        print(f"Stored {min(i + len(batch), total)}/{total} ({progress:.1f}%) - {elapsed:.1f}s - ETA: {eta/60:.1f}min - Rate: {rate:.0f} docs/min")
+                # Sparse vector (BM25-style)
+                sparse_vector = sparse_vector_from_text(doc.page_content)
+
+                # Build payload
+                payload = {
+                    "page_content": doc.page_content,
+                    **doc.metadata,
+                }
+
+                # Store entities to Neo4j knowledge graph
+                if ENABLE_KG:
+                    domain = extract_domain(doc.metadata.get("source", ""))
+                    store_entities_to_graph(doc_id, doc.page_content, domain)
+
+                point = PointStruct(
+                    id=doc_id,
+                    vector={
+                        "dense": dense_vectors[idx],
+                        "sparse": SparseVector(
+                            indices=sparse_vector.indices,
+                            values=sparse_vector.values,
+                        ),
+                    },
+                    payload=payload,
+                )
+                points.append(point)
+
+            # Batch upsert with retry
+            max_retries = 5
+            for retry in range(max_retries):
+                try:
+                    client.upsert(
+                        collection_name=COLLECTION_NAME,
+                        points=points,
+                    )
+                    break
+                except Exception as e:
+                    if retry == max_retries - 1:
+                        save_progress(i)
+                        raise
+                    pbar.set_postfix_str(f"Retry {retry + 1}/{max_retries}")
+                    time.sleep(5)
+
+            # Save progress every batch
+            save_progress(i + len(batch))
+
+            # Update progress bar with stats
+            elapsed = time.time() - start
+            rate = (i + len(batch) - start_index) / elapsed * 60
+            eta = (elapsed / (i + len(batch) - start_index)) * (total - i - len(batch))
+            pbar.update(len(batch))
+            pbar.set_postfix_str(f"{rate:.0f}/min, ETA {eta/60:.1f}min")
 
     # Delete progress file on completion
     if progress_file.exists():
         progress_file.unlink()
 
-    print(f"Finished storing {total} hybrid documents in {time.time() - start:.2f}s")
+    elapsed = time.time() - start
+    print(f"\nFinished storing {total} documents in {elapsed:.1f}s ({total/elapsed:.0f} docs/min)")
 

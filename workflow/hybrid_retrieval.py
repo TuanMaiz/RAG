@@ -16,7 +16,7 @@ from vector_stores.qdrant import (
     DENSE_WEIGHT,
     SPARSE_WEIGHT,
     client,
-    embeddings,
+    get_embeddings,
 )
 
 
@@ -79,7 +79,7 @@ def hybrid_search(
         List of (document, score) tuples sorted by hybrid score
     """
     # Get dense embedding
-    dense_vector = embeddings.embed_query(query)
+    dense_vector = get_embeddings().embed_query(query)
 
     # Get sparse vector
     sparse_vector = sparse_vector_from_text(query)
@@ -159,7 +159,7 @@ def store_hybrid_documents(docs: list[Any], batch_size: int = 1000) -> None:
             doc_id = i + idx
 
             # Dense embedding
-            dense_vector = embeddings.embed_query(doc.page_content)
+            dense_vector = get_embeddings().embed_query(doc.page_content)
 
             # Sparse vector (BM25-style)
             sparse_vector = sparse_vector_from_text(doc.page_content)

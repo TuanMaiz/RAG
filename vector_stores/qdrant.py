@@ -7,14 +7,31 @@ from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, SparseVectorParams
 
+from utils.logging_config import get_logger
+
 load_dotenv()
 
-# Embeddings - use model and base_url from env
-embeddings = OpenAIEmbeddings(
-    model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
-    openai_api_base=os.getenv("OPENAI_BASE_URL"),
-    openai_api_key=os.getenv("OPENAI_API_KEY"),
-)
+logger = get_logger(__name__)
+
+# Lazy embeddings - only create when needed
+_embeddings: OpenAIEmbeddings | None = None
+
+
+def get_embeddings() -> OpenAIEmbeddings:
+    """Get or create embeddings instance (lazy initialization)."""
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = OpenAIEmbeddings(
+            model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
+            openai_api_base=os.getenv("OPENAI_BASE_URL"),
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+        )
+    return _embeddings
+
+
+# Backward compatibility
+embeddings = get_embeddings
+
 
 # Qdrant client configuration
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -39,12 +56,12 @@ def create_hybrid_collection() -> None:
     This replaces the default collection. Use this for new hybrid retrieval.
     """
     # Get vector size from embeddings
-    vector_size = len(embeddings.embed_query("sample text"))
+    vector_size = len(get_embeddings().embed_query("sample text"))
 
     # Delete existing collection if present
     if client.collection_exists(COLLECTION_NAME):
         client.delete_collection(COLLECTION_NAME)
-        print(f"Deleted existing collection: {COLLECTION_NAME}")
+        logger.info("Deleted existing collection: %s", COLLECTION_NAME)
 
     # Create collection with named vectors
     client.create_collection(
@@ -56,10 +73,10 @@ def create_hybrid_collection() -> None:
             "sparse": SparseVectorParams(modifier="idf"),
         },
     )
-    print(f"Created hybrid collection: {COLLECTION_NAME}")
-    print(f"  - Dense vectors: {vector_size} dims, COSINE distance")
-    print(f"  - Sparse vectors: BM25 with IDF modifier")
-    print(f"  - Weights: dense={DENSE_WEIGHT}, sparse={SPARSE_WEIGHT}")
+    logger.info("Created hybrid collection: %s", COLLECTION_NAME)
+    logger.debug("  - Dense vectors: %d dims, COSINE distance", vector_size)
+    logger.debug("  - Sparse vectors: BM25 with IDF modifier")
+    logger.debug("  - Weights: dense=%.2f, sparse=%.2f", DENSE_WEIGHT, SPARSE_WEIGHT)
 
 
 def get_vector_store(embedding_model: Literal["openai"] = "openai") -> QdrantVectorStore:
@@ -75,7 +92,7 @@ def get_vector_store(embedding_model: Literal["openai"] = "openai") -> QdrantVec
         QdrantVectorStore instance
     """
     # Get vector size
-    vector_size = len(embeddings.embed_query("sample text"))
+    vector_size = len(get_embeddings().embed_query("sample text"))
 
     # Create collection if it doesn't exist
     if not client.collection_exists(COLLECTION_NAME):
@@ -83,12 +100,12 @@ def get_vector_store(embedding_model: Literal["openai"] = "openai") -> QdrantVec
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
         )
-        print(f"Created collection: {COLLECTION_NAME}")
+        logger.info("Created collection: %s", COLLECTION_NAME)
 
     return QdrantVectorStore(
         client=client,
         collection_name=COLLECTION_NAME,
-        embedding=embeddings,
+        embedding=get_embeddings(),
     )
 
 

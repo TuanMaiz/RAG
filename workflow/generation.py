@@ -8,6 +8,7 @@ from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
+from utils.logging_config import get_logger
 from workflow.context_fusion import fuse_results, format_for_llm
 from workflow.graph_retrieval import graph_search
 from workflow.hybrid_retrieval import retrieve_with_scores as hybrid_retrieve
@@ -24,13 +25,23 @@ load_dotenv()
 # KG integration flag
 ENABLE_KG = os.getenv("ENABLE_KG", "true").lower() == "true"
 
-# LLM for rewriting and judging (can use same as generation or cheaper model)
-_rewrite_llm = ChatOpenAI(
-    model=os.getenv("OPENAI_LLM_MODEL", "openai/gpt-4o-mini"),
-    temperature=0,
-    openai_api_base=os.getenv("OPENAI_BASE_URL"),
-    openai_api_key=os.getenv("OPENAI_API_KEY"),
-)
+# Lazy LLM for rewriting and judging
+_rewrite_llm: ChatOpenAI | None = None
+
+logger = get_logger(__name__)
+
+
+def _get_rewrite_llm() -> ChatOpenAI:
+    """Get or create rewrite LLM instance (lazy initialization)."""
+    global _rewrite_llm
+    if _rewrite_llm is None:
+        _rewrite_llm = ChatOpenAI(
+            model=os.getenv("OPENAI_QUERY_MODEL", os.getenv("OPENAI_LLM_MODEL", "openai/gpt-4o-mini")),
+            temperature=0,
+            openai_api_base=os.getenv("OPENAI_BASE_URL"),
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+        )
+    return _rewrite_llm
 
 # IDK Detection settings
 IDK_SCORE_THRESHOLD = 0.5
@@ -55,7 +66,7 @@ def should_rewrite(query: str, history: list[dict[str, str]]) -> bool:
         query=query
     )
 
-    response = _rewrite_llm.invoke(prompt).content.strip().lower()
+    response = _get_rewrite_llm().invoke(prompt).content.strip().lower()
     return response.startswith("y")
 
 
@@ -78,7 +89,7 @@ def rewrite_query(query: str, history: list[dict[str, str]]) -> str:
         query=query
     )
 
-    response = _rewrite_llm.invoke(prompt).content.strip()
+    response = _get_rewrite_llm().invoke(prompt).content.strip()
     return response
 
 
@@ -104,9 +115,9 @@ def retrieve_with_scores(query: str, history: list[dict[str, str]], k: int = 5):
     retrieval_query = query
     if history and should_rewrite(query, history):
         retrieval_query = rewrite_query(query, history)
-        print(f"[Query Rewritten] '{query}' → '{retrieval_query}'")
+        logger.debug("Query rewritten: '%s' → '%s'", query, retrieval_query)
     else:
-        print(f"[Query Standalone] '{query}'")
+        logger.debug("Query standalone: '%s'", query)
 
     # Duplicate for better retrieval (still helps with hybrid)
     duplicated = duplicate_query(retrieval_query)
@@ -135,9 +146,9 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
     retrieval_query = query
     if history and should_rewrite(query, history):
         retrieval_query = rewrite_query(query, history)
-        print(f"[Query Rewritten] '{query}' → '{retrieval_query}'")
+        logger.debug("Query rewritten: '%s' → '%s'", query, retrieval_query)
     else:
-        print(f"[Query Standalone] '{query}'")
+        logger.debug("Query standalone: '%s'", query)
 
     # Duplicate for better retrieval
     duplicated = duplicate_query(retrieval_query)
@@ -157,9 +168,9 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
                 max_hops=1
             )
             if graph_doc_ids:
-                print(f"[Graph Search] Found {len(graph_doc_ids)} document IDs: {graph_doc_ids}")
+                logger.debug("Graph search found %d document IDs: %s", len(graph_doc_ids), graph_doc_ids)
         except Exception as e:
-            print(f"[Graph Search] Failed: {e}")
+            logger.warning("Graph search failed: %s", e)
 
     # Fuse results
     fused_docs = fuse_results(vector_docs, graph_doc_ids, k=k)
@@ -186,7 +197,12 @@ def prompt_with_context(request: ModelRequest) -> str:
 
     # Get the user question from state
     messages = request.state.get("messages", [])
-    question = messages[-1].get("content", "") if messages else ""
+    if messages:
+        # messages[-1] could be a dict or a Message object
+        last_msg = messages[-1]
+        question = last_msg.get("content", "") if isinstance(last_msg, dict) else getattr(last_msg, "content", "")
+    else:
+        question = ""
 
     system_message = RAG_SYSTEM_PROMPT.format(
         docs_content=docs_content,
@@ -221,17 +237,17 @@ def query(query: str, model, memory: ConversationMemory) -> str:
 
     # Retrieve with KG enhancement if enabled
     if ENABLE_KG:
-        print("[KG Retrieval] Using vector + graph search")
+        logger.info("Using vector + graph search")
         retrieved_docs, max_score = retrieve_with_kg(query, history, k=5)
     else:
-        print("[Vector Retrieval] Using hybrid search only")
+        logger.info("Using hybrid search only")
         retrieved_docs, max_score = retrieve_with_scores(query, history, k=5)
 
-    print(f"[Retrieved] {len(retrieved_docs)} documents, max_score={max_score:.3f}")
+    logger.info("Retrieved %d documents, max_score=%.3f", len(retrieved_docs), max_score)
 
     # IDK Detection: if best match is below threshold, return IDK message
     if max_score < IDK_SCORE_THRESHOLD:
-        print(f"[IDK: max_score {max_score:.3f} < threshold {IDK_SCORE_THRESHOLD}]")
+        logger.info("IDK: max_score %.3f < threshold %.3f", max_score, IDK_SCORE_THRESHOLD)
         # Still save to memory so conversation continues
         memory.add_turn(query, IDK_MESSAGE)
         return IDK_MESSAGE

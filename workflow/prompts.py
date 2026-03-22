@@ -5,69 +5,62 @@ These prompts are optimized for mtRAG FANC metrics:
 - Appropriateness: Conversational context awareness
 - Naturalness: Human-like responses
 - Completeness: Thorough answers
+
+Inspired by LightRAG (HKUDS) for better entity/relationship extraction.
 """
 
 # ============================================================================
-# Knowledge Graph Extraction Prompts
+# Knowledge Graph Extraction Prompts (LightRAG-inspired)
 # ============================================================================
 
-# Entity extraction from text
-ENTITY_EXTRACTION_PROMPT = """Extract key entities from the text below.
+# Delimiters for structured output (avoids JSON parsing issues)
+TUPLE_DELIMITER = "<|#|>"
+COMPLETION_DELIMITER = "<|COMPLETE|>"
 
-Analyze the text and identify important entities such as:
-- People (PERSON)
-- Organizations (ORG)
-- Locations (LOC)
-- Events (EVENT)
-- Concepts (CONCEPT)
-- Products/Services (PRODUCT)
-- Dates/Time periods (DATE)
+# Entity extraction from text - uses delimited format (not JSON)
+ENTITY_EXTRACTION_PROMPT = """Extract entities and relationships from the text.
 
-Text: {text}
+**Output Format:**
+- Entity: `entity{delimiter}name{delimiter}type{delimiter}description`
+- Relation: `relation{delimiter}source{delimiter}target{delimiter}keywords{delimiter}description`
 
-Return ONLY valid JSON with this exact format:
-{{"entities": [{{"name": "Entity Name", "type": "PERSON|ORG|LOC|EVENT|CONCEPT|PRODUCT|DATE"}}]}}
+**Rules:**
+- Output entities first, then relations
+- Max 10 entities, max 10 relations (be selective)
+- Use title case, third person, no pronouns
+- End with: `{completion_delimiter}`
 
-Rules:
-- Extract only significant, specific entities
-- Use the most specific type possible
-- Return valid JSON only, no explanation
+**Text:**
+```
+{text}
+```
+
+**Output:**
 """
 
-# Relationship extraction between entities
-RELATIONSHIP_EXTRACTION_PROMPT = """Extract relationships between the entities in the text below.
+# Relationship extraction prompt (now uses same delimited format)
+RELATIONSHIP_EXTRACTION_PROMPT = """Extract relationships between the entities.
 
-Entities found: {entities}
+**Entities:** {entities}
 
-Text: {text}
+**Format:** `relation{delimiter}source{delimiter}target{delimiter}keywords{delimiter}description`
 
-Identify how these entities relate to each other. Common relationship types:
-- PARTICIPATED_IN (person → event)
-- LED (person → organization/group)
-- LOCATED_IN (entity → location)
-- HAPPENED_IN (event → location/date)
-- RELATED_TO (general association)
-- PART_OF (entity → larger entity)
-- CAUSED (entity → event/outcome)
+**Text:**
+```
+{text}
+```
 
-Return ONLY valid JSON with this exact format:
-{{"relationships": [{{"source": "Entity1", "target": "Entity2", "type": "RELATIONSHIP_TYPE"}}]}}
-
-Rules:
-- Only extract explicit relationships stated in the text
-- Use exact entity names from the provided list
-- Return valid JSON only, no explanation
+**Output:**
 """
 
-# Entity extraction from user query
-QUERY_ENTITY_PROMPT = """Extract key entities from this user query.
+# Entity extraction from user query (for graph search)
+QUERY_ENTITY_PROMPT = """Extract entities from this query.
 
-Query: {query}
+**Format:** `entity{delimiter}name{delimiter}type{delimiter}description`
 
-Return ONLY valid JSON with this exact format:
-{{"entities": [{{"name": "Entity Name", "type": "PERSON|ORG|LOC|EVENT|CONCEPT|PRODUCT"}}]}}
+**Query:** {query}
 
-Focus on entities that would be useful for searching a knowledge graph.
+**Output:**
 """
 
 # ============================================================================
@@ -120,3 +113,35 @@ RAG_SYSTEM_PROMPT = """You are a knowledgeable assistant. Answer questions using
 {question}
 
 ## Answer"""
+
+
+# Helper function to format prompts with delimiters
+def format_entity_prompt(text: str, examples: str = "") -> str:
+    """Format entity extraction prompt with delimiters."""
+    return ENTITY_EXTRACTION_PROMPT.format(
+        text=text,
+        delimiter=TUPLE_DELIMITER,
+        completion_delimiter=COMPLETION_DELIMITER,
+    )
+
+
+def format_relationship_prompt(text: str, entities: list) -> str:
+    """Format relationship extraction prompt."""
+    # Format entities for display
+    entity_list = ", ".join([f"{e['name']} ({e.get('type', 'OTHER')})" for e in entities])
+
+    return RELATIONSHIP_EXTRACTION_PROMPT.format(
+        text=text,
+        entities=entity_list,
+        delimiter=TUPLE_DELIMITER,
+        completion_delimiter=COMPLETION_DELIMITER,
+    )
+
+
+def format_query_prompt(query: str) -> str:
+    """Format query entity extraction prompt."""
+    return QUERY_ENTITY_PROMPT.format(
+        query=query,
+        delimiter=TUPLE_DELIMITER,
+        completion_delimiter=COMPLETION_DELIMITER,
+    )

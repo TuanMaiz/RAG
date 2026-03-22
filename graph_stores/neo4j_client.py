@@ -4,12 +4,17 @@ Simple client for Neo4j CRUD operations.
 """
 
 import os
+import re
 from typing import Any, Optional
 
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
+from utils.logging_config import get_logger
+
 load_dotenv()
+
+logger = get_logger(__name__)
 
 # Neo4j configuration
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
@@ -17,6 +22,38 @@ NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 ENABLE_KG = os.getenv("ENABLE_KG", "true").lower() == "true"
+
+
+def _sanitize_rel_type(rel_type: str) -> str:
+    """Sanitize relationship type for valid Cypher syntax.
+
+    Neo4j relationship types must be alphanumeric with underscores.
+    Converts comma-separated keywords to a valid type and returns
+    the original keywords to be stored as a property.
+
+    Args:
+        rel_type: Raw relationship type (may contain commas, spaces)
+
+    Returns:
+        Tuple of (sanitized_type, original_keywords)
+    """
+    # Store original keywords
+    original = rel_type.strip()
+
+    # Sanitize: keep only alphanumeric and underscore, uppercase
+    # Convert spaces and commas to underscores
+    sanitized = re.sub(r'[^a-zA-Z0-9]+', '_', rel_type).upper()
+    # Remove leading/trailing underscores
+    sanitized = sanitized.strip('_')
+    # Limit length (Neo4j has limits on identifier length)
+    sanitized = sanitized[:50]
+
+    # Fallback if empty
+    if not sanitized:
+        sanitized = "RELATED_TO"
+
+    return sanitized, original
+
 
 # Singleton client instance
 _driver: Optional[GraphDatabase.driver] = None
@@ -41,10 +78,10 @@ def get_driver() -> Optional[GraphDatabase.driver]:
             auth=(NEO4J_USER, NEO4J_PASSWORD),
         )
         _driver.verify_connectivity()
-        print(f"Connected to Neo4j at {NEO4J_URI}")
+        logger.info("Connected to Neo4j at %s", NEO4J_URI)
         return _driver
     except Exception as e:
-        print(f"Warning: Failed to connect to Neo4j: {e}")
+        logger.warning("Failed to connect to Neo4j: %s", e)
         _driver = None
         return None
 
@@ -152,13 +189,21 @@ def create_relationship(
     if driver is None:
         return False
 
+    # Sanitize relationship type for Cypher syntax
+    sanitized_type, original_keywords = _sanitize_rel_type(rel_type)
+
+    # Store original keywords as property
+    if rel_props is None:
+        rel_props = {}
+    rel_props["keywords"] = original_keywords
+
     from_key = list(from_props.keys())[0]
     to_key = list(to_props.keys())[0]
 
     query = f"""
     MATCH (from:{from_label} {{{from_key}: $from_val}})
     MATCH (to:{to_label} {{{to_key}: $to_val}})
-    CREATE (from)-[r:{rel_type}]->(to)
+    CREATE (from)-[r:{sanitized_type}]->(to)
     SET r += $rel_props
     RETURN r
     """
@@ -169,11 +214,11 @@ def create_relationship(
                 query,
                 from_val=from_props[from_key],
                 to_val=to_props[to_key],
-                rel_props=rel_props or {},
+                rel_props=rel_props,
             )
             return True
         except Exception as e:
-            print(f"Warning creating relationship: {e}")
+            logger.warning("Failed to create relationship: %s", e)
             return False
 
 
@@ -202,13 +247,21 @@ def merge_relationship(
     if driver is None:
         return False
 
+    # Sanitize relationship type for Cypher syntax
+    sanitized_type, original_keywords = _sanitize_rel_type(rel_type)
+
+    # Store original keywords as property
+    if rel_props is None:
+        rel_props = {}
+    rel_props["keywords"] = original_keywords
+
     from_key = list(from_props.keys())[0]
     to_key = list(to_props.keys())[0]
 
     query = f"""
     MATCH (from:{from_label} {{{from_key}: $from_val}})
     MATCH (to:{to_label} {{{to_key}: $to_val}})
-    MERGE (from)-[r:{rel_type}]->(to)
+    MERGE (from)-[r:{sanitized_type}]->(to)
     ON CREATE SET r += $rel_props
     ON MATCH SET r += $rel_props
     RETURN r
@@ -220,11 +273,11 @@ def merge_relationship(
                 query,
                 from_val=from_props[from_key],
                 to_val=to_props[to_key],
-                rel_props=rel_props or {},
+                rel_props=rel_props,
             )
             return True
         except Exception as e:
-            print(f"Warning merging relationship: {e}")
+            logger.warning("Failed to merge relationship: %s", e)
             return False
 
 
