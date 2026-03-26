@@ -92,18 +92,29 @@ def chat():
     model = get_llm(generation_model_name)
     memory = ConversationMemory(window_size=5)
 
-    print(f"\n{Colors.YELLOW}--- Chat mode (type 'quit' to exit) ---{Colors.RESET}")
+    # Import rich UI components
+    from utils.rich_ui import (
+        print_welcome_message,
+        get_user_input,
+        print_user_message,
+        print_assistant_message,
+        print_goodbye_message,
+    )
+
+    print_welcome_message()
     while True:
-        user_input = input(f"\n{Colors.CYAN}You:{Colors.RESET} ").strip()
+        user_input = get_user_input()
         if user_input.lower() in ("quit", "exit", "q"):
             break
 
         if not user_input:
             continue
 
-        print(f"{Colors.GREEN}Assistant:{Colors.RESET} ", end="", flush=True)
+        print_user_message(user_input)
         response = query(user_input, model, memory)
-        print(response)
+        print_assistant_message(response)
+
+    print_goodbye_message()
 
 
 def process_documents(dataset_dir: str = DEFAULT_DATASET_DIR, dataset_name: str | None = None):

@@ -10,9 +10,12 @@ from typing import Any
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 
+from utils.logging_config import get_logger
 from vector_stores.qdrant import client, COLLECTION_NAME
 
 load_dotenv()
+
+logger = get_logger(__name__)
 
 # KG fusion flag
 ENABLE_KG = os.getenv("ENABLE_KG", "true").lower() == "true"
@@ -50,7 +53,7 @@ def fetch_texts_from_qdrant(doc_ids: list[int]) -> list[Document]:
         return documents
 
     except Exception as e:
-        print(f"Warning: Failed to fetch texts from Qdrant: {e}")
+        logger.warning("Failed to fetch texts from Qdrant: %s", e)
         return []
 
 

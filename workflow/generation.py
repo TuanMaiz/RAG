@@ -1,6 +1,7 @@
 """RAG generation with query rewriting for multi-turn conversations."""
 
 import os
+import re
 from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -113,9 +114,9 @@ def retrieve_with_scores(query: str, history: list[dict[str, str]], k: int = 5):
     retrieval_query = query
     if history and should_rewrite(query, history):
         retrieval_query = rewrite_query(query, history)
-        logger.debug("Query rewritten: '%s' → '%s'", query, retrieval_query)
+        logger.debug("├─ Query rewritten: '%s' → '%s'", query, retrieval_query)
     else:
-        logger.debug("Query standalone: '%s'", query)
+        logger.debug("├─ Query: '%s' (standalone)", query)
 
     # Duplicate for better retrieval (still helps with hybrid)
     duplicated = duplicate_query(retrieval_query)
@@ -144,9 +145,9 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
     retrieval_query = query
     if history and should_rewrite(query, history):
         retrieval_query = rewrite_query(query, history)
-        logger.debug("Query rewritten: '%s' → '%s'", query, retrieval_query)
+        logger.debug("├─ Query rewritten: '%s' → '%s'", query, retrieval_query)
     else:
-        logger.debug("Query standalone: '%s'", query)
+        logger.debug("├─ Query: '%s' (standalone)", query)
 
     # Duplicate for better retrieval
     duplicated = duplicate_query(retrieval_query)
@@ -166,9 +167,9 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
                 max_hops=1
             )
             if graph_doc_ids:
-                logger.debug("Graph search found %d chunk IDs: %s", len(graph_doc_ids), graph_doc_ids)
+                logger.debug("├─ Graph: found %d docs", len(graph_doc_ids))
         except Exception as e:
-            logger.warning("Graph search failed: %s", e)
+            logger.warning("├─ Graph search failed: %s", e)
 
     # Fuse results
     fused_docs = fuse_results(vector_docs, graph_doc_ids, k=k)
@@ -194,35 +195,33 @@ def query(query: str, model, memory: ConversationMemory) -> str:
     """
     history = memory.get_history()
 
-    # Retrieve with KG enhancement if enabled
-    # Use k=10 for better coverage (relevant docs may be ranked lower)
+    # ─── Retrieval ────────────────────────────────────────────────────────────
     k = 10
     if ENABLE_KG:
-        logger.info("Using vector + graph search")
         retrieved_docs, max_score = retrieve_with_kg(query, history, k=k)
+        logger.info("└─ Mode: Vector + Graph search")
     else:
-        logger.info("Using hybrid search only")
         retrieved_docs, max_score = retrieve_with_scores(query, history, k=k)
+        logger.info("└─ Mode: Hybrid search (dense + sparse)")
 
-    logger.info("Retrieved %d documents, max_score=%.3f", len(retrieved_docs), max_score)
+    logger.info("└─ Retrieved: %d docs | Max score: %.3f", len(retrieved_docs), max_score)
 
-    # IDK Detection: if best match is below threshold, return IDK message
+    # IDK Detection
     if max_score < IDK_SCORE_THRESHOLD:
-        logger.info("IDK: max_score %.3f < threshold %.3f", max_score, IDK_SCORE_THRESHOLD)
-        # Still save to memory so conversation continues
+        logger.warning("└─ IDK triggered: score %.3f < threshold %.3f", max_score, IDK_SCORE_THRESHOLD)
         memory.add_turn(query, IDK_MESSAGE)
         return IDK_MESSAGE
 
-    # Build context from retrieved docs
+    # ─── Context (debug level to avoid clutter) ───────────────────────────────
     docs_content = "\n\n".join(
         f"[{i+1}] {doc.page_content}" for i, doc in enumerate(retrieved_docs)
     )
 
-    # Log context for debugging
-    logger.info("=== Context provided to LLM (%d docs) ===", len(retrieved_docs))
+    logger.debug("┌─ Context provided to LLM (%d docs)", len(retrieved_docs))
     for i, doc in enumerate(retrieved_docs):
-        logger.info("[%d] %s", i + 1, doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content)
-    logger.info("=== End context ===")
+        preview = doc.page_content[:150] + "..." if len(doc.page_content) > 150 else doc.page_content
+        logger.debug("│ [%d] %s", i + 1, preview)
+    logger.debug("└─ End context")
 
     # Build the prompt directly
     system_prompt = RAG_SYSTEM_PROMPT.format(
@@ -241,6 +240,20 @@ def query(query: str, model, memory: ConversationMemory) -> str:
 
     response = model.invoke(messages)
     response_text = response.content
+
+    # ─── Append References ─────────────────────────────────────────────────────
+    # Extract unique citation numbers used in response
+    citations = sorted(set(int(m) for m in re.findall(r'\[(\d+)\]', response_text)))
+
+    if citations:
+        references = "\n\n---\n**References:**\n"
+        for i, doc in enumerate(retrieved_docs):
+            if i + 1 in citations:
+                # Get source info if available
+                source = doc.metadata.get("source", "Unknown source")
+                # Show full text
+                references += f"\n[{i+1}] {source}\n    {doc.page_content}\n"
+        response_text += references
 
     # Save turn to memory
     memory.add_turn(query, response_text)

@@ -63,6 +63,10 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=password
 NEO4J_DATABASE=neo4j
 ENABLE_KG=true
+
+# Logging
+LOG_LEVEL=INFO              # DEBUG, INFO, WARNING, ERROR
+LOG_FILE=                   # Optional: path to log file
 ```
 
 **Note**: The system supports OpenRouter as a drop-in replacement for OpenAI. Set `OPENAI_BASE_URL` accordingly.
@@ -88,7 +92,7 @@ Retrieval:
                                           ↓
                                   Format with [1], [2] citations
                                           ↓
-                                  LLM → Response
+                                  LLM → Response + References section
 ```
 
 ### Key Design: KG as Index
@@ -110,11 +114,16 @@ Retrieval:
 - `rewrite_query()` - Rewrites query to be standalone
 - `duplicate_query()` - Returns `"query query"` for better retrieval
 - `retrieve_with_scores()` - Uses hybrid retrieval via `hybrid_retrieve()`
+- `retrieve_with_kg()` - Combines vector + graph search with context fusion
+- `query()` - Main entry point, returns response with **automatic references section**
 - IDK detection with configurable score threshold (0.5)
+- Structured logging with box-drawing characters for readability
 
 **`workflow/memory.py`**: `ConversationMemory` class tracks conversation history with sliding window (default 5 turns).
 
 **`loaders/document_loader.py`**: `JSONLLoader` parses JSONL files expecting a `text` key, stores all other keys as metadata.
+
+**`utils/logging_config.py`**: Centralized logging configuration with colored console output and optional file logging.
 
 ### Knowledge Graph Components
 
@@ -198,6 +207,32 @@ Located in `dataset/`:
 - `govt.jsonl` (108 MB) - Government documents
 
 Total: ~622k chunks after splitting.
+
+## Logging
+
+The system uses structured logging with colored console output (`utils/logging_config.py`).
+
+**Log levels**: Set `LOG_LEVEL` in `.env` (default: INFO)
+- `INFO` - Clean retrieval summaries during chat
+- `DEBUG` - Full context dumps, query details, entity extraction
+
+**Example output (INFO level)**:
+```
+└─ Mode: Vector + Graph search
+└─ Retrieved: 10 docs | Max score: 0.842
+```
+
+**Example output (DEBUG level)**:
+```
+├─ Query: "Who was Napoleon?" (standalone)
+├─ Graph: found 5 docs
+┌─ Context provided to LLM (10 docs)
+│ [1] Napoleon Bonaparte was born on August 15, 1769...
+│ [2] The French Revolution began in 1789...
+└─ End context
+```
+
+**Response format**: Answers include automatic references section with full chunk text for all citations used.
 
 ## Testing
 

@@ -296,7 +296,9 @@ RAG_SYSTEM_PROMPT = """You are a knowledgeable assistant. Answer questions using
 ## Question
 {question}
 
-## Answer"""
+## Answer
+
+Provide your answer with inline citations above. DO NOT include a references section - it will be added automatically."""
 
 # ============================================================================
 # Helper Functions

@@ -224,6 +224,4 @@ def retrieve_with_scores(
     scores = [score for doc, score in results]
     max_score = max(scores) if scores else 0.0
 
-    print(f"[Hybrid Retrieved {len(docs)} docs, max_score: {max_score:.3f}]")
-
     return docs, max_score
