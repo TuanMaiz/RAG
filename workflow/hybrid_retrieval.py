@@ -22,23 +22,32 @@ from vector_stores.qdrant import (
 
 def tokenize_bm25(text: str) -> dict[str, float]:
     """
-    Simple BM25-style tokenization for sparse vectors.
+    BM25-style tokenization for sparse vectors.
 
     Returns a dict of {token: weight} for non-zero entries.
-    This is a simplified version - Qdrant will compute proper IDF.
+    Qdrant will compute proper IDF.
     """
+    # Common stop words to filter out
+    STOP_WORDS = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+        "has", "he", "in", "is", "it", "its", "of", "on", "that", "the",
+        "to", "was", "were", "will", "with", "you", "your", "what", "when",
+        "where", "who", "which", "why", "how", "this", "these", "those",
+    }
+
     # Simple word-level tokenization (lowercase, alphanumeric)
     tokens = text.lower().split()
     # Remove non-alphanumeric chars and filter empty
     tokens = ["".join(c for c in t if c.isalnum()) for t in tokens]
-    tokens = [t for t in tokens if len(t) > 1]
+    # Filter short tokens and stop words
+    tokens = [t for t in tokens if len(t) > 2 and t not in STOP_WORDS]
 
     # Term frequency (TF) - count occurrences
     tf: dict[str, float] = {}
     for token in tokens:
         tf[token] = tf.get(token, 0) + 1
 
-    # Simple TF normalization (not full BM25, Qdrant handles IDF)
+    # TF normalization
     max_tf = max(tf.values()) if tf else 1
     return {token: count / max_tf for token, count in tf.items()}
 

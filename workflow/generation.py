@@ -3,9 +3,7 @@
 import os
 from dotenv import load_dotenv
 
-from langchain.agents.middleware import dynamic_prompt, ModelRequest
-from langchain_core.messages import SystemMessage
-from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from utils.logging_config import get_logger
@@ -162,13 +160,13 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
         try:
             graph_doc_ids = graph_search(
                 query=retrieval_query,
-                domain=None,  # Auto-infer from entities
+                title=None,  # No title filter - search across all documents
                 k=k,
                 expand=True,
                 max_hops=1
             )
             if graph_doc_ids:
-                logger.debug("Graph search found %d document IDs: %s", len(graph_doc_ids), graph_doc_ids)
+                logger.debug("Graph search found %d chunk IDs: %s", len(graph_doc_ids), graph_doc_ids)
         except Exception as e:
             logger.warning("Graph search failed: %s", e)
 
@@ -178,45 +176,6 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
     # Track max score from vector search (graph results don't have scores)
     # This is used for IDK detection
     return fused_docs, max_score
-
-
-@dynamic_prompt
-def prompt_with_context(request: ModelRequest) -> str:
-    """
-    Inject context into state messages.
-
-    This middleware retrieves docs that were already fetched
-    (stored in state by query() function) and injects them.
-    """
-    # Get pre-retrieved docs from state (set by query() function)
-    retrieved_docs = request.state.get("retrieved_docs", [])
-
-    docs_content = "\n\n".join(
-        f"[{i+1}] {doc.page_content}" for i, doc in enumerate(retrieved_docs)
-    )
-
-    # Get the user question from state
-    messages = request.state.get("messages", [])
-    if messages:
-        # messages[-1] could be a dict or a Message object
-        last_msg = messages[-1]
-        question = last_msg.get("content", "") if isinstance(last_msg, dict) else getattr(last_msg, "content", "")
-    else:
-        question = ""
-
-    system_message = RAG_SYSTEM_PROMPT.format(
-        docs_content=docs_content,
-        question=question
-    )
-
-    return system_message
-
-
-def create_rag_agent(model):
-    """Create a RAG agent with context injection."""
-    from langchain.agents import create_agent
-
-    return create_agent(model, tools=[], middleware=[prompt_with_context])
 
 
 def query(query: str, model, memory: ConversationMemory) -> str:
@@ -236,12 +195,14 @@ def query(query: str, model, memory: ConversationMemory) -> str:
     history = memory.get_history()
 
     # Retrieve with KG enhancement if enabled
+    # Use k=10 for better coverage (relevant docs may be ranked lower)
+    k = 10
     if ENABLE_KG:
         logger.info("Using vector + graph search")
-        retrieved_docs, max_score = retrieve_with_kg(query, history, k=5)
+        retrieved_docs, max_score = retrieve_with_kg(query, history, k=k)
     else:
         logger.info("Using hybrid search only")
-        retrieved_docs, max_score = retrieve_with_scores(query, history, k=5)
+        retrieved_docs, max_score = retrieve_with_scores(query, history, k=k)
 
     logger.info("Retrieved %d documents, max_score=%.3f", len(retrieved_docs), max_score)
 
@@ -252,21 +213,36 @@ def query(query: str, model, memory: ConversationMemory) -> str:
         memory.add_turn(query, IDK_MESSAGE)
         return IDK_MESSAGE
 
-    # Generate response using retrieved docs
-    agent = create_rag_agent(model)
+    # Build context from retrieved docs
+    docs_content = "\n\n".join(
+        f"[{i+1}] {doc.page_content}" for i, doc in enumerate(retrieved_docs)
+    )
 
-    # Pass retrieved docs to the agent via state
-    config = RunnableConfig()
-    state = {
-        "messages": [{"role": "user", "content": query}],
-        "conversation_history": history,
-        "retrieved_docs": retrieved_docs,
-    }
+    # Log context for debugging
+    logger.info("=== Context provided to LLM (%d docs) ===", len(retrieved_docs))
+    for i, doc in enumerate(retrieved_docs):
+        logger.info("[%d] %s", i + 1, doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content)
+    logger.info("=== End context ===")
 
-    response = agent.invoke(state, config)
+    # Build the prompt directly
+    system_prompt = RAG_SYSTEM_PROMPT.format(
+        docs_content=docs_content,
+        question=query
+    )
+
+    # Invoke model directly with system prompt
+    # Note: question is already in system_prompt, so HumanMessage is just a trigger
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content="Please provide your answer based on the context above."),
+    ]
+
+    response = model.invoke(messages)
+    response_text = response.content
 
     # Save turn to memory
-    response_text = response["messages"][-1].content
     memory.add_turn(query, response_text)
 
     return response_text

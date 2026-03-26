@@ -15,8 +15,8 @@ print("=" * 60)
 
 # Test 1: Graph Search
 print("\n1. Testing Graph Search...")
-doc_ids = graph_search("Tell me about the French Revolution", domain="clapnq", k=3)
-print(f"   ✓ Found {len(doc_ids)} document IDs: {doc_ids}")
+doc_ids = graph_search("Tell me about the French Revolution", title="French Revolution", k=3)
+print(f"   ✓ Found {len(doc_ids)} chunk IDs: {doc_ids}")
 
 # Test 2: Fetch from Qdrant
 print("\n2. Testing Fetch from Qdrant...")

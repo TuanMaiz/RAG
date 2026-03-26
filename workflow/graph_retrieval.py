@@ -1,6 +1,6 @@
 """Graph retrieval using Neo4j knowledge graph.
 
-This module queries the knowledge graph to find relevant documents
+This module queries the knowledge graph to find relevant chunks
 based on entities extracted from user queries.
 """
 
@@ -17,28 +17,31 @@ load_dotenv()
 # KG retrieval flag
 ENABLE_KG = os.getenv("ENABLE_KG", "true").lower() == "true"
 
+# Schema version: 1 = old (name, title), 2 = new (name, type)
+SCHEMA_VERSION = os.getenv("KG_SCHEMA_VERSION", "1")
+
 
 def graph_search(
     query: str,
-    domain: str | None = None,
+    title: str | None = None,
     k: int = 5,
     expand: bool = True,
     max_hops: int = 1,
 ) -> list[int]:
-    """Search knowledge graph for relevant documents.
+    """Search knowledge graph for relevant chunks.
 
-    Extracts entities from the query and finds documents that mention
+    Extracts entities from the query and finds chunks that mention
     those entities or related entities (with expansion).
 
     Args:
         query: User's question
-        domain: Optional domain filter (clapnq, cloud, fiqa, govt)
-        k: Maximum number of documents to return
+        title: Optional title filter (e.g., "French Revolution")
+        k: Maximum number of chunk IDs to return
         expand: Whether to traverse relationships for entity expansion
         max_hops: Maximum relationship hops for expansion
 
     Returns:
-        List of document IDs (integers) that match Qdrant point IDs
+        List of chunk IDs (integers) that match Qdrant point IDs
     """
     if not ENABLE_KG:
         return []
@@ -48,113 +51,79 @@ def graph_search(
     if not entities:
         return []
 
-    # Infer domain from first entity if not specified
-    # Note: extract_query_entities doesn't add domain, so we rely on user input
-    if domain is None:
-        domain = _infer_domain_from_entities(entities)
-
-    doc_ids = set()
+    chunk_ids = set()
     limit_per_entity = max(k, 10)  # Get more than k to allow for expansion
 
-    # 2. For each entity, find documents
+    # 2. For each entity, find chunks
     for entity in entities:
         entity_name = entity["name"]
 
         # Direct mentions
-        direct_docs = _find_documents_by_entity(
-            entity_name, domain, limit=limit_per_entity
+        direct_chunks = _find_chunks_by_entity(
+            entity_name, title, limit=limit_per_entity
         )
-        doc_ids.update(direct_docs)
+        chunk_ids.update(direct_chunks)
 
-        # 3. Expand to related entities if enabled
-        if expand and domain:
-            related = _expand_entities(entity_name, domain, max_hops)
+        # 3. Expand to related entities if title is specified
+        if expand and title:
+            related = _expand_entities(entity_name, title, max_hops)
             for related_entity in related[:3]:  # Limit expansion to top 3
-                related_docs = _find_documents_by_entity(
-                    related_entity, domain, limit=limit_per_entity
+                related_chunks = _find_chunks_by_entity(
+                    related_entity, title, limit=limit_per_entity
                 )
-                doc_ids.update(related_docs)
+                chunk_ids.update(related_chunks)
 
-        if len(doc_ids) >= k * 2:  # Get enough candidates
+        if len(chunk_ids) >= k * 2:  # Get enough candidates
             break
 
     # 4. Return top k as list
-    return list(doc_ids)[:k]
+    return list(chunk_ids)[:k]
 
 
-def _infer_domain_from_entities(
-    entities: list[dict[str, str]],
-) -> str | None:
-    """Infer domain from entity names using heuristics.
-
-    Args:
-        entities: List of extracted entities
-
-    Returns:
-        Inferred domain or None
-    """
-    entity_names = " ".join([e["name"].lower() for e in entities])
-
-    # Simple keyword-based domain inference
-    if any(keyword in entity_names for keyword in [
-        "napoleon", "french revolution", "corsica", "waterloo", "france",
-        "revolution", "battle", "empire", "1789", "1799"
-    ]):
-        return "clapnq"
-    elif any(keyword in entity_names for keyword in [
-        "ibm", "cloud", "cdn", "akamai", "delivery", "origin",
-        "apple", "steve jobs", "cupertino", "california"
-    ]):
-        return "cloud"
-    elif any(keyword in entity_names for keyword in [
-        "stock", "financial", "market", "investment", "trading",
-        "dividend", "portfolio", "investor", "sentiment", "conditions"
-    ]):
-        return "fiqa"
-    elif any(keyword in entity_names for keyword in [
-        "government", "agency", "service", "policy", "federal"
-    ]):
-        return "govt"
-
-    return None
-
-
-def _find_documents_by_entity(
+def _find_chunks_by_entity(
     entity_name: str,
-    domain: str | None = None,
+    title: str | None = None,
     limit: int = 10,
 ) -> list[int]:
-    """Find documents that mention a specific entity.
+    """Find chunks that mention a specific entity.
 
-    Queries Neo4j for Document nodes connected to an Entity node
+    Queries Neo4j for Chunk nodes connected to an Entity node
     via the MENTIONS relationship.
 
     Args:
         entity_name: Name of the entity to search for
-        domain: Optional domain filter
-        limit: Maximum number of documents to return
+        title: Optional title filter (used for domain scoping in schema v1)
+        limit: Maximum number of chunks to return
 
     Returns:
-        List of document IDs (integers)
+        List of chunk IDs (integers)
     """
-    query = """
-    MATCH (d:Document)-[:MENTIONS]->(e:Entity {name: $name})
-    """
+    # Schema v1: (name, title) as key
+    if SCHEMA_VERSION == "1":
+        query = "MATCH (c:Chunk)-[:MENTIONS]->(e:Entity {name: $name})"
+        params = {"name": entity_name}
 
-    params = {"name": entity_name}
+        if title:
+            query += " WHERE e.title = $title"
+            params["title"] = title
+    else:
+        # Schema v2: (name, type) as key, title becomes optional domain filter
+        query = "MATCH (c:Chunk)-[:MENTIONS]->(e:Entity {name: $name})"
+        params = {"name": entity_name}
 
-    if domain:
-        query += " WHERE e.domain = $domain"
-        params["domain"] = domain
+        if title:
+            # Optional: filter by domain or aliases
+            query += " WHERE e.domain = $title OR $title IN e.aliases"
+            params["title"] = title
 
-    query += " RETURN d.id"
+    query += " RETURN c.id"
 
     if limit:
         query += f" LIMIT {limit}"
 
     try:
         results = execute_query(query, params)
-        return [int(r["d.id"]) for r in results if r.get("d.id") is not None]
+        return [int(r["c.id"]) for r in results if r.get("c.id") is not None]
     except Exception as e:
         print(f"Warning: Graph query failed for entity '{entity_name}': {e}")
         return []
@@ -162,7 +131,7 @@ def _find_documents_by_entity(
 
 def _expand_entities(
     entity_name: str,
-    domain: str,
+    title: str,
     max_hops: int = 2,
 ) -> list[str]:
     """Find related entities through relationship traversal.
@@ -172,20 +141,35 @@ def _expand_entities(
 
     Args:
         entity_name: Name of the starting entity
-        domain: Domain to constrain the search
+        title: Title/domain to constrain the search
         max_hops: Maximum relationship hops to traverse
 
     Returns:
         List of related entity names
     """
-    query = f"""
-    MATCH (start:Entity {{name: $name, domain: $domain}})-[*1..{max_hops}]-(related:Entity)
-    WHERE related.domain = $domain AND related.name <> $name
-    RETURN DISTINCT related.name
-    LIMIT 5
-    """
+    # Schema v1: (name, title) as key
+    if SCHEMA_VERSION == "1":
+        query = f"""
+        MATCH (start:Entity {{name: $name, title: $title}})-[*1..{max_hops}]-(related:Entity)
+        WHERE related.title = $title AND related.name <> $name
+        RETURN DISTINCT related.name
+        LIMIT 5
+        """
+    else:
+        # Schema v2: (name, type) as key, optional domain filter
+        query = f"""
+        MATCH (start:Entity {{name: $name}})-[*1..{max_hops}]-(related:Entity)
+        WHERE related.name <> $name
+        """
+        if title:
+            query += " AND (related.domain = $title OR $title IN related.aliases)"
 
-    params = {"name": entity_name, "domain": domain}
+        query += """
+        RETURN DISTINCT related.name
+        LIMIT 5
+        """
+
+    params = {"name": entity_name, "title": title}
 
     try:
         results = execute_query(query, params)
@@ -197,30 +181,47 @@ def _expand_entities(
 
 def get_entity_context(
     entity_name: str,
-    domain: str,
+    title: str,
 ) -> dict[str, Any]:
     """Get detailed context about an entity from the knowledge graph.
 
     Retrieves the entity node along with its related entities and
-    the documents that mention it.
+    the chunks that mention it.
 
     Args:
         entity_name: Name of the entity
-        domain: Domain to constrain the search
+        title: Title/domain to constrain the search
 
     Returns:
-        Dictionary with entity info, related entities, and document IDs
+        Dictionary with entity info, related entities, and chunk IDs
     """
-    query = """
-    MATCH (e:Entity {name: $name, domain: $domain})
-    OPTIONAL MATCH (e)-[r]-(related:Entity)
-    OPTIONAL MATCH (d:Document)-[:MENTIONS]->(e)
-    RETURN e.name as name, e.type as type,
-           collect(DISTINCT related.name)[0..5] as related_entities,
-           collect(DISTINCT d.id) as document_ids
-    """
+    # Schema v1: (name, title) as key
+    if SCHEMA_VERSION == "1":
+        query = """
+        MATCH (e:Entity {name: $name, title: $title})
+        OPTIONAL MATCH (e)-[r]-(related:Entity)
+        OPTIONAL MATCH (c:Chunk)-[:MENTIONS]->(e)
+        RETURN e.name as name, e.type as type,
+               collect(DISTINCT related.name)[0..5] as related_entities,
+               collect(DISTINCT c.id) as chunk_ids
+        """
+        params = {"name": entity_name, "title": title}
+    else:
+        # Schema v2: (name, type) as key, title is optional domain filter
+        query = """
+        MATCH (e:Entity {name: $name})
+        OPTIONAL MATCH (e)-[r]-(related:Entity)
+        OPTIONAL MATCH (c:Chunk)-[:MENTIONS]->(e)
+        """
+        if title:
+            query += " WHERE e.domain = $title OR $title IN e.aliases"
 
-    params = {"name": entity_name, "domain": domain}
+        query += """
+        RETURN e.name as name, e.type as type,
+               collect(DISTINCT related.name)[0..5] as related_entities,
+               collect(DISTINCT c.id) as chunk_ids
+        """
+        params = {"name": entity_name, "title": title}
 
     try:
         results = execute_query(query, params)
@@ -229,7 +230,7 @@ def get_entity_context(
                 "name": results[0].get("name"),
                 "type": results[0].get("type"),
                 "related_entities": results[0].get("related_entities", []),
-                "document_ids": results[0].get("document_ids", []),
+                "chunk_ids": results[0].get("chunk_ids", []),
             }
     except Exception as e:
         print(f"Warning: Failed to get entity context for '{entity_name}': {e}")
@@ -242,18 +243,18 @@ if __name__ == "__main__":
     # Test graph search
     print("Testing graph retrieval...")
 
-    # Test 1: Search for Napoleon (should return clapnq documents)
+    # Test: Search for Napoleon
     test_query = "Who was Napoleon Bonaparte?"
     print(f"\nQuery: {test_query}")
-    doc_ids = graph_search(test_query, domain="clapnq", k=5)
-    print(f"Found {len(doc_ids)} documents: {doc_ids}")
+    chunk_ids = graph_search(test_query, title="French Revolution", k=5)
+    print(f"Found {len(chunk_ids)} chunks: {chunk_ids}")
 
-    # Test 2: Search with expansion
+    # Test: Entity expansion
     print("\nTesting entity expansion...")
-    related = _expand_entities("Napoleon", "clapnq", max_hops=2)
+    related = _expand_entities("Napoleon", "French Revolution", max_hops=2)
     print(f"Entities related to 'Napoleon': {related}")
 
-    # Test 3: Get entity context
+    # Test: Entity context
     print("\nTesting entity context retrieval...")
-    context = get_entity_context("Napoleon", "clapnq")
+    context = get_entity_context("Napoleon", "French Revolution")
     print(f"Context for 'Napoleon': {context}")

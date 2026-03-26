@@ -1,0 +1,16 @@
+{
+  "include": [
+    "workflow",
+    "loaders",
+    "graph_stores",
+    "utils",
+    "vector_stores"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/.venv",
+    "**/__pycache__"
+  ],
+  "venvPath": ".venv",
+  "pythonVersion": "3.13"
+}

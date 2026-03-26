@@ -161,7 +161,7 @@ def evaluate_with_config(
             try:
                 graph_doc_ids = graph_search(
                     query=retrieval_query,
-                    domain=None,
+                    title=None,
                     k=5,
                     expand=True,
                 )

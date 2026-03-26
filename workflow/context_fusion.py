@@ -64,8 +64,8 @@ def fuse_results(
 
     Uses a simple scoring approach:
     - Vector docs: Ranked by original retrieval order (score implicit)
-    - Graph docs: Boosted by graph_weight
-    - Deduplicated by document ID
+    - Graph docs: Appended to end (not inserted in middle to preserve vector ranking)
+    - Deduplicated by content
 
     Args:
         vector_docs: Documents from hybrid vector search
@@ -82,14 +82,13 @@ def fuse_results(
     # Fetch actual texts for graph results
     graph_docs = fetch_texts_from_qdrant(graph_doc_ids)
 
-    # Track seen Qdrant point IDs to deduplicate
-    # Use a simple approach: compare by content hash for deduplication
+    # Track seen by content hash
     seen_content = set()
     fused = []
 
     def _content_hash(doc: Document) -> str:
         """Create a simple hash of document content for deduplication."""
-        return doc.page_content[:100]  # First 100 chars as identifier
+        return doc.page_content[:100]
 
     # First pass: Add vector docs (they come pre-ranked)
     for doc in vector_docs:
@@ -98,17 +97,12 @@ def fuse_results(
             seen_content.add(content_hash)
             fused.append(doc)
 
-    # Second pass: Add graph docs not already in vector results
-    # Give them a boost by placing them strategically
+    # Second pass: Append graph docs (not insert) to preserve vector ranking
     for doc in graph_docs:
         content_hash = _content_hash(doc)
         if content_hash not in seen_content:
             seen_content.add(content_hash)
-
-            # Insert graph docs after top vector docs, but before lower-ranked ones
-            # This gives them a "boost" without completely overriding vector ranking
-            insert_pos = min(len(fused), max(2, k // 2))
-            fused.insert(insert_pos, doc)
+            fused.append(doc)  # Append to end, don't insert in middle
 
     return fused[:k]
 

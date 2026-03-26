@@ -50,19 +50,19 @@ def extract_domain(source_path: str) -> str:
 
 
 def store_entities_to_graph(
-    doc_id: int,
+    chunk_id: int,
     text: str,
-    domain: str,
+    title: str,
 ) -> bool:
-    """Extract entities from text and store in Neo4j.
+    """Extract entities from chunk text and store in Neo4j.
 
-    Creates Document node, Entity nodes, and MENTIONS relationships.
+    Creates Chunk node, Entity nodes, and MENTIONS relationships.
     Also creates relationships between entities.
 
     Args:
-        doc_id: Qdrant point ID (also Document node ID in Neo4j)
-        text: Document text to extract entities from
-        domain: Dataset domain (clapnq, cloud, fiqa, govt)
+        chunk_id: Qdrant point ID (also Chunk node ID in Neo4j)
+        text: Chunk text to extract entities from
+        title: Document title (groups chunks from same document)
 
     Returns:
         True if successful or KG disabled, False on error
@@ -79,42 +79,182 @@ def store_entities_to_graph(
 
     try:
         # Extract entities and relationships
-        graph_data = extract_graph_data(text, domain)
+        graph_data = extract_graph_data(text)
 
         if not graph_data["entities"]:
             return True  # No entities found, but not an error
 
-        # Create/update Document node
-        merge_node("Document", {"id": str(doc_id), "domain": domain})
+        # Create/update Chunk node
+        merge_node("Chunk", {"id": str(chunk_id), "title": title})
 
         # Create/update Entity nodes and MENTIONS relationships
         for entity in graph_data["entities"]:
             merge_node("Entity", {
                 "name": entity["name"],
                 "type": entity["type"],
-                "domain": domain
+                "title": title
             })
 
-            # Link Document to Entity
+            # Link Chunk to Entity
             create_relationship(
-                "Document", {"id": str(doc_id)},
-                "Entity", {"name": entity["name"], "domain": domain},
+                "Chunk", {"id": str(chunk_id)},
+                "Entity", {"name": entity["name"], "title": title},
                 "MENTIONS"
             )
 
         # Store relationships between entities
         for rel in graph_data.get("relationships", []):
             create_relationship(
-                "Entity", {"name": rel["source"], "domain": domain},
-                "Entity", {"name": rel["target"], "domain": domain},
+                "Entity", {"name": rel["source"], "title": title},
+                "Entity", {"name": rel["target"], "title": title},
                 rel["type"]
             )
 
         return True
 
     except Exception as e:
-        logger.warning("Failed to store entities for doc %d: %s", doc_id, e)
+        logger.warning("Failed to store entities for chunk %d: %s", chunk_id, e)
         return False
+
+
+def store_entities_to_graph_batch(texts_with_ids: list[tuple[int, str, str]]) -> None:
+    """Extract and store entities for multiple chunks in batch.
+
+    Args:
+        texts_with_ids: List of (chunk_id, text, title) tuples
+    """
+    # Check if deduplication is enabled
+    enable_dedup = os.getenv("KG_ENABLE_IN_MEMORY_DEDUP", "false").lower() == "true"
+
+    if enable_dedup:
+        store_entities_to_graph_batch_dedup(texts_with_ids)
+    else:
+        store_entities_to_graph_batch_legacy(texts_with_ids)
+
+
+def store_entities_to_graph_batch_legacy(texts_with_ids: list[tuple[int, str, str]]) -> None:
+    """Legacy extraction and storage (per-chunk, no deduplication).
+
+    Args:
+        texts_with_ids: List of (chunk_id, text, title) tuples
+    """
+    if not ENABLE_KG or not texts_with_ids:
+        return
+
+    from graph_stores.neo4j_client import get_driver, merge_node, create_relationship
+    from workflow.kg_extraction import extract_graph_data_batch
+
+    driver = get_driver()
+    if driver is None:
+        logger.warning("Neo4j not available, skipping KG extraction")
+        return
+
+    # Prepare data: map by title
+    title_groups: dict[str, list[tuple[int, str]]] = {}
+    for chunk_id, text, title in texts_with_ids:
+        if title not in title_groups:
+            title_groups[title] = []
+        title_groups[title].append((chunk_id, text))
+
+    # Process each title group
+    for title, texts in title_groups.items():
+        try:
+            # Batch extraction for this title group
+            texts_with_ids = [(chunk_id, text) for chunk_id, text in texts]
+            results = extract_graph_data_batch(texts_with_ids, batch_size=10)
+
+            # Store results
+            for chunk_id, data in results.items():
+                entities = data.get("entities", [])
+                relationships = data.get("relationships", [])
+
+                if not entities:
+                    continue
+
+                # Create Chunk node
+                merge_node("Chunk", {"id": str(chunk_id), "title": title})
+
+                # Create Entity nodes and MENTIONS relationships
+                for entity in entities:
+                    merge_node("Entity", {
+                        "name": entity["name"],
+                        "type": entity["type"],
+                        "title": title
+                    })
+
+                    create_relationship(
+                        "Chunk", {"id": str(chunk_id)},
+                        "Entity", {"name": entity["name"], "title": title},
+                        "MENTIONS"
+                    )
+
+                # Store relationships between entities
+                for rel in relationships:
+                    create_relationship(
+                        "Entity", {"name": rel["source"], "title": title},
+                        "Entity", {"name": rel["target"], "title": title},
+                        rel["type"]
+                    )
+
+        except Exception as e:
+            logger.warning("Batch KG extraction failed for title '%s': %s", title, e)
+
+
+def store_entities_to_graph_batch_dedup(texts_with_ids: list[tuple[int, str, str]]) -> None:
+    """Extract entities with in-memory deduplication before Neo4j storage.
+
+    This implements the new pipeline:
+    1. Extract all entities/relationships from chunks
+    2. Deduplicate across chunks (alias resolution, merging)
+    3. Bulk upsert to Neo4j
+
+    Args:
+        texts_with_ids: List of (chunk_id, text, title) tuples
+    """
+    if not ENABLE_KG or not texts_with_ids:
+        return
+
+    from graph_stores.neo4j_client import get_driver
+    from workflow.kg_dedup import dedup_and_store
+    from workflow.kg_extraction import extract_graph_data_batch
+
+    driver = get_driver()
+    if driver is None:
+        logger.warning("Neo4j not available, skipping KG extraction")
+        return
+
+    # Group by title/domain for processing
+    title_groups: dict[str, list[tuple]] = {}
+    for chunk_id, text, title in texts_with_ids:
+        if title not in title_groups:
+            title_groups[title] = []
+        title_groups[title].append((chunk_id, text))
+
+    # Process each title group with deduplication
+    for title, texts in title_groups.items():
+        try:
+            # Extract entities for all chunks in this title group
+            texts_with_ids = [(chunk_id, text) for chunk_id, text in texts]
+            results = extract_graph_data_batch(texts_with_ids, batch_size=10, domain=title)
+
+            # Convert to format expected by dedup_and_store
+            chunk_results = []
+            for chunk_id, data in results.items():
+                chunk_results.append({
+                    "chunk_id": chunk_id,
+                    "entities": data.get("entities", []),
+                    "relationships": data.get("relationships", []),
+                })
+
+            # Deduplicate and bulk upsert
+            stats = dedup_and_store(chunk_results, domain=title)
+            logger.info(
+                "Deduplication for '%s': %d entities, %d relationships",
+                title, stats["entity_count"], stats["relationship_count"]
+            )
+
+        except Exception as e:
+            logger.warning("Deduplication failed for title '%s': %s", title, e)
 
 
 def load_doc(dataset_dir: str | Path = "dataset", dataset_name: str | None = None) -> list[Document]:
@@ -255,11 +395,6 @@ def store_doc(docs: list[Document], batch_size: int = 350, resume: bool = True):
                     **doc.metadata,
                 }
 
-                # Store entities to Neo4j knowledge graph
-                if ENABLE_KG:
-                    domain = extract_domain(doc.metadata.get("source", ""))
-                    store_entities_to_graph(doc_id, doc.page_content, domain)
-
                 point = PointStruct(
                     id=doc_id,
                     vector={
@@ -288,6 +423,16 @@ def store_doc(docs: list[Document], batch_size: int = 350, resume: bool = True):
                         raise
                     pbar.set_postfix_str(f"Retry {retry + 1}/{max_retries}")
                     time.sleep(5)
+
+            # Batch KG extraction (if enabled) - process all docs in batch at once
+            if ENABLE_KG:
+                pbar.set_postfix_str("Extracting entities...")
+                # Collect (chunk_id, text, title) tuples for this batch
+                kg_texts = [(i + idx, doc.page_content, doc.metadata.get("title", "Unknown"))
+                               for idx, doc in enumerate(batch)]
+
+                # Extract and store entities for the batch
+                store_entities_to_graph_batch(kg_texts)
 
             # Save progress every batch
             save_progress(i + len(batch))
