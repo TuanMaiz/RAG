@@ -1,6 +1,10 @@
+import json
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from qdrant_client.http.models import PointStruct, SparseVector
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -18,6 +22,9 @@ from workflow.hybrid_retrieval import sparse_vector_from_text
 
 # KG indexing flag
 ENABLE_KG = os.getenv("ENABLE_KG", "true").lower() == "true"
+
+# Parallel processing config
+DEFAULT_MAX_WORKERS = int(os.getenv("INDEXING_MAX_WORKERS", "4"))
 
 logger = get_logger(__name__)
 
@@ -304,14 +311,133 @@ def load_doc(dataset_dir: str | Path = "dataset", dataset_name: str | None = Non
     return all_splits
 
 
-def store_doc(docs: list[Document], batch_size: int = 350, resume: bool = True):
+def _process_batch(
+    docs: list[Document],
+    start_idx: int,
+    batch_size: int,
+) -> dict:
+    """Process a single batch with parallel KG extraction.
+
+    This function runs two pipelines concurrently:
+    1. Vector pipeline: embeddings → sparse → Qdrant upsert
+    2. KG pipeline: entity extraction and storage (if enabled)
+
+    Args:
+        docs: List of Documents in this batch
+        start_idx: Starting index for document IDs
+        batch_size: Batch size for progress tracking
+
+    Returns:
+        dict with keys: count, success, error (if any)
     """
-    Store documents with hybrid (dense + sparse) vectors.
+    # Prepare data
+    texts = [doc.page_content for doc in docs]
+
+    # Generate embeddings (blocking API call)
+    try:
+        dense_vectors = get_embeddings().embed_documents(texts)
+    except Exception as e:
+        time.sleep(10)
+        dense_vectors = get_embeddings().embed_documents(texts)
+
+    # Build points with sparse vectors
+    points = []
+    kg_texts = []
+    for idx, doc in enumerate(docs):
+        doc_id = start_idx + idx
+
+        # Sparse vector (BM25-style, local and fast)
+        sparse_vector = sparse_vector_from_text(doc.page_content)
+
+        # Build payload
+        payload = {
+            "page_content": doc.page_content,
+            **doc.metadata,
+        }
+
+        point = PointStruct(
+            id=doc_id,
+            vector={
+                "dense": dense_vectors[idx],
+                "sparse": SparseVector(
+                    indices=sparse_vector.indices,
+                    values=sparse_vector.values,
+                ),
+            },
+            payload=payload,
+        )
+        points.append(point)
+
+        # Collect for KG extraction
+        if ENABLE_KG:
+            kg_texts.append((
+                doc_id,
+                doc.page_content,
+                doc.metadata.get("title", "Unknown")
+            ))
+
+    # Prepare data for KG pipeline
+    kg_data = kg_texts if ENABLE_KG else None
+
+    # Define pipelines
+    def _vector_pipeline():
+        """Execute Qdrant upsert with retry logic."""
+        max_retries = 5
+        for retry in range(max_retries):
+            try:
+                client.upsert(
+                    collection_name=COLLECTION_NAME,
+                    points=points,
+                )
+                return None
+            except Exception as e:
+                if retry == max_retries - 1:
+                    return e
+                time.sleep(5)
+        return None
+
+    def _kg_pipeline():
+        """Execute KG extraction."""
+        if kg_data:
+            store_entities_to_graph_batch(kg_data)
+        return None
+
+    # Run vector pipeline (KG runs in parallel thread)
+    kg_thread = None
+    if kg_data:
+        kg_thread = threading.Thread(target=_kg_pipeline, daemon=False)
+        kg_thread.start()
+
+    # Execute vector pipeline (blocking - must complete)
+    vector_error = _vector_pipeline()
+
+    # Return both result and KG thread so caller can join it
+    if vector_error:
+        # Wait for KG thread before raising error
+        if kg_thread and kg_thread.is_alive():
+            kg_thread.join(timeout=30)
+        raise vector_error
+
+    return {
+        "count": len(docs),
+        "success": True,
+        "kg_thread": kg_thread,  # Return thread for later joining
+    }
+
+
+def store_doc(docs: list[Document], batch_size: int = 350, resume: bool = True, max_workers: int | None = None):
+    """
+    Store documents with hybrid (dense + sparse) vectors using parallel batch processing.
+
+    Multiple batches are processed concurrently using ThreadPoolExecutor. Within each batch,
+    vector storage (embeddings + Qdrant) and KG extraction run in parallel since KG only
+    needs the original text.
 
     Args:
         docs: List of Document objects to store
-        batch_size: Number of documents to store per batch
+        batch_size: Number of documents to store per batch (default: 350)
         resume: If True, continue from existing collection (don't delete)
+        max_workers: Number of parallel workers (default: INDEXING_MAX_WORKERS env var, or 4)
     """
     import json
     from pathlib import Path
@@ -365,84 +491,74 @@ def store_doc(docs: list[Document], batch_size: int = 350, resume: bool = True):
     # Calculate number of batches
     num_batches = (total - start_index + batch_size - 1) // batch_size
 
+    # Configure parallel workers
+    if max_workers is None:
+        max_workers = DEFAULT_MAX_WORKERS
+
+    print(f"Parallel indexing with {max_workers} workers (batch_size={batch_size})")
+
+    # Thread-safe progress tracking
+    progress_lock = threading.Lock()
+    processed_count = [start_index]  # List for mutability in closure
+
+    def update_progress(delta: int):
+        """Thread-safe progress update."""
+        with progress_lock:
+            processed_count[0] += delta
+            pbar.update(delta)
+            # Save progress periodically (every batch_size * workers)
+            if processed_count[0] % (batch_size * max_workers) == 0 or processed_count[0] == total:
+                save_progress(processed_count[0])
+
+    # Prepare batches as (batch_docs, start_idx) tuples
+    batches = [
+        (docs[i:i + batch_size], i)
+        for i in range(start_index, total, batch_size)
+    ]
+
+    # Track KG threads for cleanup
+    kg_threads: list[threading.Thread] = []
+    kg_lock = threading.Lock()
+
     # Progress bar with tqdm
     with tqdm(total=total - start_index, desc="Indexing", unit="doc",
-              initial=start_index, ncols=100) as pbar:
-        for i in range(start_index, total, batch_size):
-            batch = docs[i : i + batch_size]
-            batch_start = time.time()
+              initial=start_index, ncols=120) as pbar:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all batches
+            future_to_batch = {
+                executor.submit(_process_batch, batch, start_idx, batch_size): (start_idx, len(batch))
+                for batch, start_idx in batches
+            }
 
-            # Batch embeddings
-            texts = [doc.page_content for doc in batch]
-            try:
-                dense_vectors = get_embeddings().embed_documents(texts)
-            except Exception as e:
-                pbar.set_postfix_str("Retrying...")
-                time.sleep(10)
-                dense_vectors = get_embeddings().embed_documents(texts)
-
-            # Build points
-            points = []
-            for idx, doc in enumerate(batch):
-                doc_id = i + idx
-
-                # Sparse vector (BM25-style)
-                sparse_vector = sparse_vector_from_text(doc.page_content)
-
-                # Build payload
-                payload = {
-                    "page_content": doc.page_content,
-                    **doc.metadata,
-                }
-
-                point = PointStruct(
-                    id=doc_id,
-                    vector={
-                        "dense": dense_vectors[idx],
-                        "sparse": SparseVector(
-                            indices=sparse_vector.indices,
-                            values=sparse_vector.values,
-                        ),
-                    },
-                    payload=payload,
-                )
-                points.append(point)
-
-            # Batch upsert with retry
-            max_retries = 5
-            for retry in range(max_retries):
+            # Process completed batches
+            for future in as_completed(future_to_batch):
+                batch_start_idx, batch_len = future_to_batch[future]
                 try:
-                    client.upsert(
-                        collection_name=COLLECTION_NAME,
-                        points=points,
-                    )
-                    break
+                    result = future.result()
+                    if result["success"]:
+                        update_progress(result["count"])
+                        # Collect KG thread for later joining
+                        if result.get("kg_thread"):
+                            with kg_lock:
+                                kg_threads.append(result["kg_thread"])
+                    else:
+                        # Handle failure - save progress and raise
+                        save_progress(processed_count[0])
+                        raise result["error"]
                 except Exception as e:
-                    if retry == max_retries - 1:
-                        save_progress(i)
-                        raise
-                    pbar.set_postfix_str(f"Retry {retry + 1}/{max_retries}")
-                    time.sleep(5)
+                    save_progress(processed_count[0])
+                    raise
 
-            # Batch KG extraction (if enabled) - process all docs in batch at once
-            if ENABLE_KG:
-                pbar.set_postfix_str("Extracting entities...")
-                # Collect (chunk_id, text, title) tuples for this batch
-                kg_texts = [(i + idx, doc.page_content, doc.metadata.get("title", "Unknown"))
-                               for idx, doc in enumerate(batch)]
-
-                # Extract and store entities for the batch
-                store_entities_to_graph_batch(kg_texts)
-
-            # Save progress every batch
-            save_progress(i + len(batch))
-
-            # Update progress bar with stats
-            elapsed = time.time() - start
-            rate = (i + len(batch) - start_index) / elapsed * 60
-            eta = (elapsed / (i + len(batch) - start_index)) * (total - i - len(batch))
-            pbar.update(len(batch))
-            pbar.set_postfix_str(f"{rate:.0f}/min, ETA {eta/60:.1f}min")
+    # Wait for all KG threads to complete before returning
+    if kg_threads:
+        alive_count = sum(1 for t in kg_threads if t.is_alive())
+        print(f"\nWaiting for {alive_count}/{len(kg_threads)} KG extraction threads to complete...")
+        # Join ALL threads (not just alive ones, to handle race conditions)
+        for i, thread in enumerate(kg_threads, 1):
+            if thread.is_alive():
+                thread.join()  # No timeout - wait until truly complete
+                print(f"  Thread {i}/{len(kg_threads)} done", end="\r")
+        print(f"\nAll {len(kg_threads)} KG threads complete!")
 
     # Delete progress file on completion
     if progress_file.exists():
