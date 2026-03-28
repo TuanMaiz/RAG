@@ -9,6 +9,8 @@ A Retrieval-Augmented Generation (RAG) system competing in the [mtRAG benchmark]
 - **Query Rewriting**: LLM-based query rewriting for multi-turn context
 - **IDK Detection**: Confidence threshold for unanswerable questions
 - **Conversation Memory**: Tracks conversation history for context-aware responses
+- **Rich Chat UI**: Beautiful terminal interface with boxed messages and markdown rendering
+- **Parallel Indexing**: Concurrent batch processing for 4-6x faster indexing
 
 ## Architecture
 
@@ -91,6 +93,59 @@ Select:
 2. **Process documents** - Index documents into vector store
 3. **Exit**
 
+## Chat Interface
+
+The chat mode uses `rich` for a polished terminal experience:
+
+```
+┌──────────────────────────────────────────────┐
+│ Chat mode                                     │
+│ Type your questions below.                    │
+│ Type quit, exit, or q to exit.                │
+└──────────────────────────────────────────────┘
+
+You: Who was Napoleon?
+
+┌─ You ──────────────────────────────────────────┐
+│ Who was Napoleon?                              │
+└────────────────────────────────────────────────┘
+
+┌─ Assistant ─────────────────────────────────────┐
+│ Napoleon Bonaparte was a French military...    │
+│                                                 │
+│ ---                                             │
+│ **References:**                                 │
+│ [1] clapnq.jsonl                               │
+│     Napoleon Bonaparte was born on...          │
+└────────────────────────────────────────────────┘
+```
+
+- Markdown rendering for responses (bold, code, lists)
+- Automatic references section with full source text
+- Clean boxed output for readability
+
+## Performance
+
+### Parallel Indexing
+
+The indexing pipeline uses concurrent batch processing for significant speedup:
+
+| Configuration | Throughput | 622k docs time |
+|---------------|------------|----------------|
+| Sequential (old) | ~6,900 docs/min | ~90 min |
+| 4 workers | ~25,000 docs/min | ~25 min |
+| 8 workers | ~40,000+ docs/min | ~15 min |
+
+**How it works:**
+- Multiple batches processed in parallel using `ThreadPoolExecutor`
+- Vector storage (embeddings + Qdrant) and KG extraction run concurrently within each batch
+- Thread-safe progress tracking and resume capability
+
+**Adjust workers in `.env`:**
+```bash
+INDEXING_MAX_WORKERS=8  # More workers = faster (watch API rate limits)
+```
+
 ## Project Structure
 
 ```
@@ -114,7 +169,7 @@ project/
 │   └── neo4j_client.py          # Neo4j client
 │
 ├── workflow/                    # Core RAG workflows
-│   ├── indexing.py              # Document indexing
+│   ├── indexing.py              # Document indexing (parallel batch processing)
 │   ├── generation.py            # RAG generation
 │   ├── memory.py                # Conversation memory
 │   ├── prompts.py               # System prompts
@@ -122,6 +177,10 @@ project/
 │   ├── kg_extraction.py         # Entity extraction
 │   ├── graph_retrieval.py       # Graph search
 │   └── context_fusion.py        # Merge vector + graph results
+│
+├── utils/                       # Utilities
+│   ├── logging_config.py        # Structured logging
+│   └── rich_ui.py               # Rich terminal UI components
 │
 ├── dataset/                     # Training data
 │   ├── clapnq.jsonl             # French Revolution
@@ -202,7 +261,7 @@ The system uses Neo4j to store entities and their relationships:
 |---------------------|---------|-------------|
 | `OPENAI_API_KEY` | - | OpenAI/OpenRouter API key |
 | `OPENAI_BASE_URL` | - | API base URL |
-| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-large` | Embedding model |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model |
 | `OPENAI_LLM_MODEL` | `gpt-4o-mini` | LLM model |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant URL |
 | `QDRANT_COLLECTION` | `rag_documents` | Collection name |
@@ -211,6 +270,8 @@ The system uses Neo4j to store entities and their relationships:
 | `NEO4J_USER` | `neo4j` | Neo4j username |
 | `NEO4J_PASSWORD` | `password` | Neo4j password |
 | `ENABLE_KG` | `true` | Enable knowledge graph |
+| `INDEXING_MAX_WORKERS` | `4` | Parallel batch workers for indexing |
+| `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ## License
 
