@@ -5,11 +5,10 @@ Implements the deduplication strategy from documents/kg_pipeline_plan.md:
 - Entity merging by (name, type) key
 - Relationship merging by (source, target, type) key
 - Orphan edge filtering
-- Bulk Neo4j upsert
+- Bulk Neo4j upsert with retry logic
 """
 
-import os
-from collections import defaultdict
+import time
 from typing import Any
 
 # Global aliases (domain-independent)
@@ -35,6 +34,36 @@ DOMAIN_ALIASES = {
         "the cloud": "ibm cloud",
     },
 }
+
+
+def _entity_type_to_label(entity_type: str) -> str:
+    """Convert entity type to valid Neo4j label.
+
+    Args:
+        entity_type: Entity type string (e.g., "PERSON", "ORG", "LOCATION")
+
+    Returns:
+        Valid Neo4j label (e.g., "Person", "Organization", "Location")
+    """
+    # Mapping of common entity types to labels
+    type_mapping = {
+        "PERSON": "Person",
+        "ORG": "Organization",
+        "ORGANIZATION": "Organization",
+        "LOC": "Location",
+        "LOCATION": "Location",
+        "EVENT": "Event",
+        "CONCEPT": "Concept",
+        "PRODUCT": "Product",
+        "DATE": "Date",
+        "OTHER": "Other",
+    }
+
+    # Normalize input
+    normalized = entity_type.upper().strip()
+
+    # Return mapped label or fall back to capitalized version
+    return type_mapping.get(normalized, entity_type.capitalize())
 
 
 def resolve_alias(name: str, domain: str | None = None) -> str:
@@ -94,6 +123,7 @@ def merge_entities_across_chunks(
                     "name": canonical_name,
                     "type": entity_type,
                     "description": entity.get("description", ""),
+                    "keywords": set(entity.get("keywords", [])),  # NEW: Track keywords
                     "seen_in_chunks": [chunk_id],
                     "aliases": set(),
                     "domain": domain or "unknown",
@@ -105,6 +135,9 @@ def merge_entities_across_chunks(
                 if len(entity.get("description", "")) > len(existing.get("description", "")):
                     existing["description"] = entity.get("description", "")
 
+                # Merge keywords
+                existing["keywords"].update(entity.get("keywords", []))
+
                 # Track chunks
                 existing["seen_in_chunks"].append(chunk_id)
 
@@ -115,6 +148,7 @@ def merge_entities_across_chunks(
     # Convert sets to lists for JSON serialization
     for entity in merged.values():
         entity["aliases"] = list(entity["aliases"])
+        entity["keywords"] = list(entity["keywords"])  # NEW: Convert keywords
         entity["seen_in_chunks"] = list(set(entity["seen_in_chunks"]))  # Dedupe
 
     return merged
@@ -164,7 +198,10 @@ def merge_relationships_across_chunks(
                     "source": canonical_source,
                     "target": canonical_target,
                     "type": rel_type,
+                    "semantic_type": rel.get("semantic_type", rel_type),  # NEW: Semantic type
                     "description": rel.get("description", ""),
+                    "strength": rel.get("strength", 5),  # NEW: Relationship strength
+                    "keywords": set(rel.get("keywords", [])),  # NEW: Track keywords
                     "seen_in_chunks": [chunk_id],
                     "domain": domain or "unknown",
                 }
@@ -175,11 +212,18 @@ def merge_relationships_across_chunks(
                 if len(rel.get("description", "")) > len(existing.get("description", "")):
                     existing["description"] = rel.get("description", "")
 
+                # Keep higher strength
+                existing["strength"] = max(existing.get("strength", 5), rel.get("strength", 5))
+
+                # Merge keywords
+                existing["keywords"].update(rel.get("keywords", []))
+
                 existing["seen_in_chunks"].append(chunk_id)
 
-    # Dedupe chunk lists
+    # Dedupe chunk lists and convert sets
     for rel in merged.values():
         rel["seen_in_chunks"] = list(set(rel["seen_in_chunks"]))
+        rel["keywords"] = list(rel["keywords"])  # NEW: Convert keywords
 
     return merged
 
@@ -192,12 +236,59 @@ def _infer_entity_type(name: str, entities: list[dict]) -> str:
     return "OTHER"
 
 
+def _retry_neo4j_operation(
+    operation,
+    max_retries: int = 3,
+    delay: float = 2.0,
+    operation_name: str = "Neo4j operation",
+) -> Any:
+    """Retry a Neo4j operation with exponential backoff.
+
+    Args:
+        operation: Callable to execute
+        max_retries: Maximum number of retry attempts
+        delay: Initial delay in seconds (doubles each retry)
+        operation_name: Name for logging
+
+    Returns:
+        Result of the operation
+
+    Raises:
+        Exception: If all retries fail
+    """
+    from utils.logging_config import get_logger
+    logger = get_logger(__name__)
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                wait_time = delay * (2 ** attempt)  # Exponential backoff
+                logger.warning(
+                    "%s failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                    operation_name, attempt + 1, max_retries, e, wait_time
+                )
+                time.sleep(wait_time)
+            else:
+                logger.error(
+                    "%s failed after %d attempts: %s",
+                    operation_name, max_retries, e
+                )
+
+    raise last_error
+
+
 def bulk_upsert_to_neo4j(
     merged_entities: dict[tuple[str, str], dict[str, Any]],
     merged_relationships: dict[tuple[str, str, str], dict[str, Any]],
     domain: str | None = None,
 ) -> bool:
     """Bulk upsert merged entities and relationships to Neo4j.
+
+    Creates nodes with type-specific labels only (e.g., :Person, :Organization).
 
     Args:
         merged_entities: Dict from merge_entities_across_chunks
@@ -210,57 +301,86 @@ def bulk_upsert_to_neo4j(
     from graph_stores.neo4j_client import execute_query
 
     try:
-        # Batch upsert entities using UNWIND
-        entity_params = []
+        # Group entities by label for batch operations
+        entities_by_label: dict[str, list[dict]] = {}
         for (name, entity_type), entity_data in merged_entities.items():
-            entity_params.append({
+            label = _entity_type_to_label(entity_type)
+            if label not in entities_by_label:
+                entities_by_label[label] = []
+            entities_by_label[label].append({
                 "name": name,
-                "type": entity_type,
+                "type": entity_type,  # Keep type property
                 "description": entity_data.get("description", ""),
+                "keywords": entity_data.get("keywords", []),  # NEW: Entity keywords
                 "domain": domain or entity_data.get("domain", "unknown"),
                 "aliases": entity_data.get("aliases", []),
+                "chunk_ids": entity_data.get("seen_in_chunks", []),  # Qdrant point IDs
             })
 
-        if entity_params:
-            entity_query = """
+        # Batch upsert entities per label (type-specific label + type property)
+        for label, entity_list in entities_by_label.items():
+            query = f"""
             UNWIND $entities AS entity
-            MERGE (e:Entity {name: entity.name, type: entity.type})
-            ON CREATE SET e.description = entity.description, e.domain = entity.domain, e.aliases = entity.aliases
+            MERGE (e:{label} {{name: entity.name}})
+            ON CREATE SET
+                e.type = entity.type,
+                e.description = entity.description,
+                e.keywords = entity.keywords,
+                e.domain = entity.domain,
+                e.aliases = entity.aliases,
+                e.chunk_ids = entity.chunk_ids
             ON MATCH SET
-                e.description = CASE
-                    WHEN length(entity.description) > length(e.description)
-                    THEN entity.description
-                    ELSE e.description
+                e.type = entity.type,
+                e.description = entity.description,
+                e.keywords = CASE
+                    WHEN size(entity.keywords) > 0
+                    THEN COALESCE(e.keywords, []) + entity.keywords
+                    ELSE e.keywords
                 END,
                 e.aliases = CASE
                     WHEN size(entity.aliases) > 0 THEN COALESCE(e.aliases, []) + entity.aliases
                     ELSE e.aliases
+                END,
+                e.chunk_ids = CASE
+                    WHEN size(entity.chunk_ids) > 0
+                    THEN COALESCE(e.chunk_ids, []) + entity.chunk_ids
+                    ELSE e.chunk_ids
                 END
             """
-            execute_query(entity_query, {"entities": entity_params})
+            execute_query(query, {"entities": entity_list})
 
-        # Batch upsert relationships
+        # Batch upsert relationships (label-agnostic)
         rel_params = []
         for (source, target, rel_type), rel_data in merged_relationships.items():
             rel_params.append({
                 "source": source,
                 "target": target,
                 "type": rel_type,
+                "semantic_type": rel_data.get("semantic_type", rel_type),  # NEW: Semantic type
                 "description": rel_data.get("description", ""),
+                "strength": rel_data.get("strength", 5),  # NEW: Relationship strength
+                "keywords": rel_data.get("keywords", []),  # NEW: Relationship keywords
             })
 
         if rel_params:
             rel_query = """
             UNWIND $relationships AS rel
-            MATCH (s:Entity {name: rel.source})
-            MATCH (t:Entity {name: rel.target})
-            MERGE (s)-[r:RELATED_TO {type: rel.type}]->(t)
-            ON CREATE SET r.description = rel.description
+            MATCH (s {name: rel.source})
+            MATCH (t {name: rel.target})
+            MERGE (s)-[r:RELATED_TO]->(t)
+            ON CREATE SET
+                r.type = rel.type,
+                r.semantic_type = rel.semantic_type,
+                r.description = rel.description,
+                r.strength = rel.strength,
+                r.keywords = rel.keywords
             ON MATCH SET
-                r.description = CASE
-                    WHEN length(rel.description) > length(r.description)
-                    THEN rel.description
-                    ELSE r.description
+                r.description = rel.description,
+                r.strength = rel.strength,
+                r.keywords = CASE
+                    WHEN size(rel.keywords) > 0
+                    THEN COALESCE(r.keywords, []) + rel.keywords
+                    ELSE r.keywords
                 END
             """
             execute_query(rel_query, {"relationships": rel_params})
@@ -277,12 +397,14 @@ def bulk_upsert_to_neo4j(
 def dedup_and_store(
     chunk_results: list[dict[str, Any]],
     domain: str | None = None,
+    max_retries: int = 3,
 ) -> dict[str, Any]:
-    """Complete deduplication and storage pipeline.
+    """Complete deduplication and storage pipeline with retry logic.
 
     Args:
         chunk_results: List of {chunk_id, entities: [...], relationships: [...]}
         domain: Optional domain for alias resolution
+        max_retries: Maximum retry attempts for Neo4j operations
 
     Returns:
         Dict with stats about deduplication
@@ -298,8 +420,13 @@ def dedup_and_store(
         chunk_results, domain, valid_entities
     )
 
-    # Bulk upsert to Neo4j
-    success = bulk_upsert_to_neo4j(merged_entities, merged_relationships, domain)
+    # Bulk upsert to Neo4j with retry
+    success = _retry_neo4j_operation(
+        lambda: bulk_upsert_to_neo4j(merged_entities, merged_relationships, domain),
+        max_retries=max_retries,
+        delay=2.0,
+        operation_name="Bulk upsert to Neo4j"
+    )
 
     return {
         "success": success,
