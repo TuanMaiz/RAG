@@ -215,17 +215,36 @@ Examples:
 - "the king", "Louis XVI" -> always use "Louis XVI"
 - "it", "the cloud", "IBM Cloud" -> always use "IBM Cloud"
 
+## Entity Extraction
+For each entity, extract:
+- name: Complete, specific name (apply coreference resolution)
+- type: One of the entity types above
+- description: 2-3 comprehensive sentences describing the entity's attributes,
+  role, and significance in the context. Be specific and informative.
+- keywords: 3-5 high-level terms that characterize this entity
+  (e.g., for Napoleon: ["French military", "emperor", "revolutionary", "Corsica", "empire"])
+
+## Relationship Extraction
+For each clearly related pair (source, target):
+- source, target: Entity names from above
+- type: Semantic relationship type in camelCase
+  (e.g., LED, BORN_IN, PARTICIPATED_IN, FOUNDED, ALLIED_WITH, OPPOSED, LOCATED_IN, WROTE, COMMANDER_OF)
+- description: Why they are related
+- strength: 1-10 score indicating relationship importance/confidence
+  (10 = core/essential relationship, 1 = tangential/uncertain)
+- keywords: 2-3 high-level thematic keywords
+  (e.g., ["Military leadership", "Power structure", "Political alliance"])
+
 ## Output Format
 Return a JSON object with:
-- entities: list of {{name, type, description}}
-- relationships: list of {{source, target, type, description}}
+- entities: list of {{name, type, description, keywords}}
+- relationships: list of {{source, target, type, description, strength, keywords}}
 
 ## Rules
 - Only extract from the provided text
 - Be specific, avoid generic entities
 - Use consistent, complete names for entities (apply coreference resolution)
-- Description should be concise but informative
-- Use camelCase for relationship types (e.g., WROTE_ABOUT, BORN_IN, LED)
+- Use descriptive, specific relationship types (not just "RELATED_TO")
 - Treat relationships as undirected unless explicitly stated otherwise
 - Write entity names and descriptions in third person
 """
@@ -234,6 +253,83 @@ Return a JSON object with:
 STRUCTURED_ENTITY_EXTRACTION_USER_PROMPT = """Text: {text}
 
 Extract all entities and relationships."""
+
+# Batch structured extraction prompt - multiple documents with source tracking
+STRUCTURED_BATCH_EXTRACTION_SYSTEM_PROMPT = """You are an expert knowledge graph extractor.
+Extract entities and relationships from multiple documents.
+
+## Entity Types
+{entity_types}
+
+## Document ID Tracking
+Each document is marked with "--- Document ID ---" where ID is an INTEGER.
+You MUST use this EXACT INTEGER value for source_doc_id.
+Example: If marked "--- Document 1 ---", use source_doc_id: 1 (NOT "Document 1")
+
+## Coreference Resolution
+When the same entity is referred to by different names or pronouns,
+always use the most complete and specific identifier throughout.
+
+## Entity Extraction
+For each entity, extract:
+- name: Complete, specific name (apply coreference resolution)
+- type: One of the entity types above
+- description: 2-3 comprehensive sentences
+- keywords: 3-5 high-level terms characterizing this entity
+- source_doc_id: The INTEGER ID from the document marker (e.g., 1, 2, 3)
+
+## Relationship Extraction
+For each clearly related pair (source, target):
+- source, target: Entity names from above
+- type: Semantic relationship type in camelCase
+- description: Why they are related
+- strength: 1-10 score (10 = core, 1 = tangential)
+- keywords: 2-3 high-level thematic keywords
+- source_doc_id: The INTEGER ID from the document marker
+
+## Output Format
+Return a JSON object with:
+- entities: list of {{name, type, description, keywords, source_doc_id}}
+- relationships: list of {{source, target, type, description, strength, keywords, source_doc_id}}
+
+## Rules
+- Only extract from the provided documents
+- Be specific, avoid generic entities
+- Use consistent names for entities
+- Track which document each entity/relationship came from using INTEGER IDs
+"""
+
+# User prompt wrapper for batch structured extraction
+def format_structured_batch_prompt(
+    texts_with_ids: list[tuple[int, str]],
+    entity_types: list[str],
+) -> tuple[str, str]:
+    """Format prompts for batch structured entity extraction.
+
+    Args:
+        texts_with_ids: List of (doc_id, text) tuples
+        entity_types: List of valid entity types
+
+    Returns:
+        Tuple of (system_prompt, user_prompt)
+    """
+    system_prompt = STRUCTURED_BATCH_EXTRACTION_SYSTEM_PROMPT.format(
+        entity_types=", ".join(entity_types),
+    )
+
+    # Format documents with clear ID markers
+    docs_block = ""
+    for doc_id, text in texts_with_ids:
+        # Truncate for context window
+        truncated = text[:1500] + "..." if len(text) > 1500 else text
+        docs_block += f"\n--- Document {doc_id} ---\n{truncated}\n"
+
+    user_prompt = f"""Extract entities and relationships from the following documents.
+IMPORTANT: Use the INTEGER document ID for source_doc_id (e.g., 1, 2, 3).
+{docs_block}
+Extract all entities and relationships."""
+
+    return system_prompt, user_prompt
 
 # Gleaning prompt - second pass to catch missed entities
 GLEANING_PROMPT = """Some entities or relationships may have been missed.

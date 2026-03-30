@@ -13,7 +13,6 @@ from typing import Any
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel
 
 from utils.logging_config import get_logger
 from workflow.kg_cache import ExtractionCache
@@ -25,6 +24,7 @@ from workflow.prompts import (
     format_entity_prompt,
     format_gleaning_prompt,
     format_query_prompt,
+    format_structured_batch_prompt,
     format_structured_entity_prompt,
     get_entity_types_for_domain,
 )
@@ -172,22 +172,26 @@ def _parse_batch_output(content: str, doc_ids: list[int]) -> dict[int, dict[str,
 # Structured Output Extraction (New)
 # ============================================================================
 
-def _normalize_entity(entity: Entity) -> dict[str, str]:
+def _normalize_entity(entity: Entity) -> dict[str, Any]:
     """Normalize an entity from Pydantic model to dict."""
     return {
         "name": entity.name.lower().strip(),
         "type": entity.type.upper(),
         "description": entity.description,
+        "keywords": entity.keywords if entity.keywords else [],
     }
 
 
-def _normalize_relationship(rel: Relationship) -> dict[str, str]:
+def _normalize_relationship(rel: Relationship) -> dict[str, Any]:
     """Normalize a relationship from Pydantic model to dict."""
     return {
         "source": rel.source.lower().strip(),
         "target": rel.target.lower().strip(),
         "type": rel.type,
+        "semantic_type": rel.type,  # Store the semantic type
         "description": rel.description,
+        "strength": rel.strength if rel.strength else 5,
+        "keywords": rel.keywords if rel.keywords else [],
     }
 
 
@@ -480,15 +484,41 @@ def extract_graph_data_batch(
     for doc_id in doc_ids:
         results[doc_id] = {"entities": [], "relationships": []}
 
-    # Process each text individually for structured output
-    # (Batch processing with structured output is more complex)
-    if USE_STRUCTURED_OUTPUT:
-        for doc_id, text in normalized:
+    # Use batch structured extraction if available
+    if USE_STRUCTURED_OUTPUT and structured_llm is not None:
+        entity_types = get_entity_types_for_domain(domain)
+
+        # Process in batches
+        for i in range(0, len(normalized), batch_size):
+            batch = normalized[i : i + batch_size]
+
             try:
-                extracted = extract_entities(text, domain=domain, enable_gleaning=False)
-                results[doc_id] = extracted
+                system_prompt, user_prompt = format_structured_batch_prompt(
+                    batch, entity_types
+                )
+
+                kg_result = structured_llm.invoke([
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ])
+
+                # Distribute results by source_doc_id
+                _distribute_results_by_doc(kg_result, results)
+
+                logger.debug("Batch extraction: docs %d-%d, %d entities, %d relationships",
+                             i, i + len(batch) - 1,
+                             len(kg_result.entities), len(kg_result.relationships))
+
             except Exception as e:
-                logger.warning("Extraction failed for doc %d: %s", doc_id, e)
+                logger.warning("Batch structured extraction failed (docs %d-%d): %s",
+                              i, i + len(batch) - 1, e)
+                # Fall back to individual processing
+                for doc_id, text in batch:
+                    try:
+                        extracted = extract_entities(text, domain=domain, enable_gleaning=False)
+                        results[doc_id] = extracted
+                    except Exception as e2:
+                        logger.warning("Individual extraction failed for doc %d: %s", doc_id, e2)
     else:
         # Use legacy batch processing
         for i in range(0, len(normalized), batch_size):
@@ -508,6 +538,43 @@ def extract_graph_data_batch(
                 logger.warning("Batch extraction failed (docs %d-%d): %s", i, i + len(batch) - 1, e)
 
     return results
+
+
+def _distribute_results_by_doc(
+    kg_result: KnowledgeGraph,
+    results: dict[int, dict[str, Any]],
+) -> None:
+    """Distribute extraction results to their source documents.
+
+    Args:
+        kg_result: KnowledgeGraph with entities/relationships containing source_doc_id
+        results: Results dict to populate, mapping doc_id to entities/relationships
+    """
+    # Distribute entities
+    for entity in kg_result.entities:
+        if entity.source_doc_id is None:
+            continue  # Skip entities without source_doc_id (shouldn't happen in batch mode)
+
+        doc_id = entity.source_doc_id
+        if doc_id not in results:
+            results[doc_id] = {"entities": [], "relationships": []}
+
+        # Normalize entity without source_doc_id (internal use only)
+        entity_dict = _normalize_entity(entity)
+        results[doc_id]["entities"].append(entity_dict)
+
+    # Distribute relationships
+    for rel in kg_result.relationships:
+        if rel.source_doc_id is None:
+            continue  # Skip relationships without source_doc_id
+
+        doc_id = rel.source_doc_id
+        if doc_id not in results:
+            results[doc_id] = {"entities": [], "relationships": []}
+
+        # Normalize relationship without source_doc_id
+        rel_dict = _normalize_relationship(rel)
+        results[doc_id]["relationships"].append(rel_dict)
 
 
 # ============================================================================
