@@ -23,6 +23,11 @@ def _get_store_doc():
     return store_doc
 
 
+def _get_streaming_indexer():
+    from workflow.threading_indexing import StreamingIndexer
+    return StreamingIndexer
+
+
 def _get_conversation_memory():
     from workflow.memory import ConversationMemory
     return ConversationMemory
@@ -53,6 +58,23 @@ DATASETS = {
 }
 
 DEFAULT_DATASET_DIR = "dataset"
+
+
+def choose_indexer_mode():
+    """Prompt user to choose indexer mode.
+
+    Returns:
+        1 for current indexer, 2 for streaming indexer
+    """
+    print(f"\n{Colors.CYAN}=== Indexing Mode Selection ==={Colors.RESET}")
+    print(f"  {Colors.GREEN}1.{Colors.RESET} Current (threaded batches) - Proven, stable")
+    print(f"  {Colors.GREEN}2.{Colors.RESET} Streaming (experimental) - Faster, optimized batch size")
+
+    while True:
+        choice = input(f"\n{Colors.YELLOW}Choose mode [1-2]:{Colors.RESET} ").strip()
+        if choice in ("1", "2"):
+            return int(choice)
+        print(f"{Colors.RED}Invalid choice, please enter 1 or 2{Colors.RESET}")
 
 
 def scan_datasets(dataset_dir: str = DEFAULT_DATASET_DIR) -> list[tuple[str, str]]:
@@ -126,7 +148,6 @@ def process_documents(dataset_dir: str = DEFAULT_DATASET_DIR, dataset_name: str 
     """
     client, COLLECTION_NAME = _get_qdrant()
     load_doc = _get_load_doc()
-    store_doc = _get_store_doc()
 
     # Check if collection exists and has documents
     if client.collection_exists(COLLECTION_NAME):
@@ -152,10 +173,31 @@ def process_documents(dataset_dir: str = DEFAULT_DATASET_DIR, dataset_name: str 
 
     print(f"{Colors.GREEN}Total documents to index: {len(docs)}{Colors.RESET}")
 
-    # Store in vector store
-    print(f"\n{Colors.BLUE}Storing documents in vector store...{Colors.RESET}")
-    store_doc(docs)
-    print(f"{Colors.GREEN}Indexing complete!{Colors.RESET}")
+    # Choose indexer mode
+    indexer_mode = choose_indexer_mode()
+
+    if indexer_mode == 2:
+        # Use streaming indexer
+        StreamingIndexer = _get_streaming_indexer()
+
+        print(f"\n{Colors.BLUE}Using Streaming Indexer (optimized batch size)...{Colors.RESET}")
+        indexer = StreamingIndexer()
+        results = indexer.index(docs, show_progress=True)
+
+        print(f"\n{Colors.GREEN}Indexing complete!{Colors.RESET}")
+        print(f"  {Colors.CYAN}Extracted:{Colors.RESET} {results['extracted_docs']} documents")
+        print(f"  {Colors.CYAN}Upserted:{Colors.RESET} {results['upserted_docs']} documents")
+        print(f"  {Colors.CYAN}Time:{Colors.RESET} {results['elapsed_seconds']:.1f} seconds")
+        print(f"  {Colors.CYAN}Speed:{Colors.RESET} {results['docs_per_minute']:.1f} docs/min")
+
+        if results['exceptions']:
+            print(f"  {Colors.YELLOW}Warnings:{Colors.RESET} {len(results['exceptions'])} exceptions occurred")
+    else:
+        # Use existing store_doc
+        store_doc = _get_store_doc()
+        print(f"\n{Colors.BLUE}Storing documents in vector store...{Colors.RESET}")
+        store_doc(docs)
+        print(f"{Colors.GREEN}Indexing complete!{Colors.RESET}")
 
 
 def select_dataset_interactive(dataset_dir: str = DEFAULT_DATASET_DIR) -> str | None:
