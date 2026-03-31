@@ -185,12 +185,11 @@ def merge_relationships_across_chunks(
             key = (canonical_source, canonical_target, rel_type)
 
             # Orphan guard: skip if source/target not in valid entities
+            # Check if entity name exists with any type (more lenient than exact type match)
             if valid_entities:
-                source_type = _infer_entity_type(canonical_source, chunk_result.get("entities", []))
-                target_type = _infer_entity_type(canonical_target, chunk_result.get("entities", []))
-                if (canonical_source, source_type) not in valid_entities:
-                    continue
-                if (canonical_target, target_type) not in valid_entities:
+                source_exists = any(name == canonical_source for (name, _) in valid_entities)
+                target_exists = any(name == canonical_target for (name, _) in valid_entities)
+                if not source_exists or not target_exists:
                     continue
 
             if key not in merged:
@@ -281,6 +280,43 @@ def _retry_neo4j_operation(
     raise last_error
 
 
+def _sanitize_relationship_type(rel_type: str) -> str:
+    """Sanitize relationship type for Neo4j.
+
+    Neo4j relationship types must:
+    - Start with a letter (a-z, A-Z)
+    - Contain only letters, numbers, and underscores
+    - Not be empty
+
+    Args:
+        rel_type: Raw relationship type string
+
+    Returns:
+        Sanitized relationship type safe for Neo4j
+    """
+    import re
+
+    if not rel_type or not isinstance(rel_type, str):
+        return "RELATED_TO"
+
+    # Remove any characters that aren't letters, numbers, or underscores
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", rel_type)
+
+    # Ensure it starts with a letter
+    if sanitized and sanitized[0].isdigit():
+        sanitized = "REL_" + sanitized
+
+    # Handle edge cases
+    if not sanitized or sanitized == "_":
+        return "RELATED_TO"
+
+    # Limit length (Neo4j has limits on identifier length)
+    if len(sanitized) > 100:
+        sanitized = sanitized[:100]
+
+    return sanitized.upper()
+
+
 def bulk_upsert_to_neo4j(
     merged_entities: dict[tuple[str, str], dict[str, Any]],
     merged_relationships: dict[tuple[str, str, str], dict[str, Any]],
@@ -363,27 +399,40 @@ def bulk_upsert_to_neo4j(
             })
 
         if rel_params:
-            rel_query = """
-            UNWIND $relationships AS rel
-            MATCH (s {name: rel.source})
-            MATCH (t {name: rel.target})
-            MERGE (s)-[r:RELATED_TO]->(t)
-            ON CREATE SET
-                r.type = rel.type,
-                r.semantic_type = rel.semantic_type,
-                r.description = rel.description,
-                r.strength = rel.strength,
-                r.keywords = rel.keywords
-            ON MATCH SET
-                r.description = rel.description,
-                r.strength = rel.strength,
-                r.keywords = CASE
-                    WHEN size(rel.keywords) > 0
-                    THEN COALESCE(r.keywords, []) + rel.keywords
-                    ELSE r.keywords
-                END
-            """
-            execute_query(rel_query, {"relationships": rel_params})
+            # Group relationships by semantic_type for batch operations with dynamic types
+            rels_by_type: dict[str, list[dict]] = {}
+            for rel in rel_params:
+                # Use semantic_type if available, otherwise fallback to generic type
+                rel_type_name = rel.get("semantic_type", "RELATED_TO")
+                # Sanitize: ensure it starts with letter and only contains valid chars
+                rel_type_name = _sanitize_relationship_type(rel_type_name)
+
+                if rel_type_name not in rels_by_type:
+                    rels_by_type[rel_type_name] = []
+                rels_by_type[rel_type_name].append(rel)
+
+            # Upsert each relationship type separately (Neo4j requires static type in query)
+            for rel_type_name, rels_of_type in rels_by_type.items():
+                rel_query = f"""
+                UNWIND $relationships AS rel
+                MATCH (s {{name: rel.source}})
+                MATCH (t {{name: rel.target}})
+                MERGE (s)-[r:{rel_type_name}]->(t)
+                ON CREATE SET
+                    r.type = rel.type,
+                    r.description = rel.description,
+                    r.strength = rel.strength,
+                    r.keywords = rel.keywords
+                ON MATCH SET
+                    r.description = rel.description,
+                    r.strength = rel.strength,
+                    r.keywords = CASE
+                        WHEN size(rel.keywords) > 0
+                        THEN COALESCE(r.keywords, []) + rel.keywords
+                        ELSE r.keywords
+                    END
+                """
+                execute_query(rel_query, {"relationships": rels_of_type})
 
         return True
 
