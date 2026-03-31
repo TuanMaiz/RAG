@@ -14,6 +14,7 @@ import shelve
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -372,3 +373,213 @@ def retry_with_backoff(
                 )
 
     return None
+
+
+# ============================================================================
+# Streaming Indexer
+# ============================================================================
+
+# Configuration defaults
+DEFAULT_MAX_WORKERS = int(os.getenv("INDEXING_MAX_WORKERS", "8"))
+DEFAULT_BATCH_SIZE = int(os.getenv("INDEXING_BATCH_SIZE", "350"))
+DEFAULT_MAX_MEMORY_GB = float(os.getenv("INDEXING_MAX_MEMORY_GB", "4"))
+GLOBAL_DEDUP_INTERVAL = int(os.getenv("GLOBAL_DEDUP_INTERVAL", "10"))
+
+
+class StreamingIndexer:
+    """Multi-threaded streaming indexer with backpressure control.
+
+    Optimized for speed:
+    - Parallel extract workers (max LLM parallelism)
+    - Optimized batch size from model context calculation
+    - Memory queue with spill-to-disk (no blocking)
+    - Single upsert worker (safe Neo4j writes)
+    - Dual progress bars
+    """
+
+    def __init__(
+        self,
+        max_workers: int | None = None,
+        batch_size: int | None = None,
+        max_memory_gb: float | None = None,
+        neo4j_concurrent_writes: bool = False,
+    ):
+        """Initialize the streaming indexer.
+
+        Args:
+            max_workers: Number of extraction threads
+            batch_size: Documents per batch
+            max_memory_gb: Max memory for result queue in GB
+            neo4j_concurrent_writes: Enable concurrent Neo4j upserts (experimental)
+        """
+        self.max_workers = max_workers or DEFAULT_MAX_WORKERS
+        self.batch_size = batch_size or DEFAULT_BATCH_SIZE
+        self.max_memory_gb = max_memory_gb or DEFAULT_MAX_MEMORY_GB
+        self.neo4j_concurrent_writes = neo4j_concurrent_writes
+
+        # Calculate queue size based on memory
+        batch_memory = estimate_batch_memory(self.batch_size)
+        max_queue_memory = self.max_memory_gb * 1024**3
+        self.queue_size = max(1, int(max_queue_memory / batch_memory))
+
+        # Create memory queue
+        self.queue = MemoryQueue(
+            max_memory_gb=self.max_memory_gb,
+            spill_threshold=float(os.getenv("SPILL_THRESHOLD_PCT", "90")) / 100,
+            restore_threshold=float(os.getenv("RESTORE_THRESHOLD_PCT", "60")) / 100,
+        )
+
+        # Progress tracking
+        self.extracted_counter = ThreadSafeCounter()
+        self.upserted_counter = ThreadSafeCounter()
+        self.extracted_pbar = None
+        self.upserted_pbar = None
+
+        # Control flags
+        self.stop_event = threading.Event()
+        self.exceptions = []
+
+        logger.info(
+            "StreamingIndexer initialized: workers=%d, batch_size=%d, memory=%.1fGB",
+            self.max_workers, self.batch_size, self.max_memory_gb
+        )
+
+    def _extract_batch(self, batch_data: list[tuple[int, Any]]) -> dict[str, Any]:
+        """Extract KG and embeddings for a batch.
+
+        Called by extract worker threads.
+
+        Args:
+            batch_data: List of (doc_id, document) tuples
+
+        Returns:
+            Dict with points and neo4j_data
+        """
+        from workflow.kg_extraction import extract_graph_data_batch
+        from workflow.kg_dedup import merge_entities_across_chunks, merge_relationships_across_chunks
+        from vector_stores.qdrant import get_embeddings
+        from workflow.indexing import _extract_keywords_from_kg
+
+        try:
+            from qdrant_client.http.models import PointStruct, SparseVector
+        except ImportError:
+            # Fallback for older qdrant-client versions
+            from qdrant_client.models import PointStruct, SparseVector
+
+        from workflow.hybrid_retrieval import sparse_vector_from_text
+
+        doc_ids, documents = zip(*batch_data)
+
+        # Step 1: KG extraction (optimized batch size)
+        texts_with_ids = [(i, d.page_content) for i, d in enumerate(documents)]
+
+        # Get calculated batch size or use env override
+        kg_batch_size = int(os.getenv("KG_BATCH_SIZE", "500"))
+
+        try:
+            kg_results = extract_graph_data_batch(
+                texts_with_ids,
+                batch_size=kg_batch_size,
+                domain=documents[0].metadata.get("title", "unknown")
+            )
+        except Exception as e:
+            logger.error("KG extraction failed: %s", e)
+            # Return empty results so we can continue
+            kg_results = {i: {"entities": [], "relationships": []} for i in range(len(documents))}
+
+        # Step 2: Local dedup
+        chunk_results = []
+        for doc_id, data in kg_results.items():
+            chunk_results.append({
+                "chunk_id": doc_id,
+                "entities": data.get("entities", []),
+                "relationships": data.get("relationships", []),
+            })
+
+        domain = documents[0].metadata.get("title", "unknown")
+        merged_entities = merge_entities_across_chunks(chunk_results, domain)
+        valid_entities = set(merged_entities.keys())
+        merged_relationships = merge_relationships_across_chunks(
+            chunk_results, domain, valid_entities
+        )
+
+        # Step 3: Prepare enriched text and embed
+        enriched_texts = []
+        keywords_list = []
+
+        for idx, doc in enumerate(documents):
+            kg_data = kg_results.get(idx, {"entities": [], "relationships": []})
+            keywords = _extract_keywords_from_kg(kg_data)
+            keywords_list.append(keywords)
+
+            if keywords:
+                enriched_texts.append(f"{doc.page_content}\n\nKeywords: {keywords}")
+            else:
+                enriched_texts.append(doc.page_content)
+
+        # Step 4: Embed
+        try:
+            embeddings = get_embeddings().embed_documents(enriched_texts)
+        except Exception:
+            time.sleep(10)
+            embeddings = get_embeddings().embed_documents(enriched_texts)
+
+        # Step 5: Build Qdrant points
+        points = []
+        for idx, doc in enumerate(documents):
+            doc_id = doc_ids[idx]
+            sparse_vector = sparse_vector_from_text(doc.page_content)
+
+            payload = {
+                "page_content": doc.page_content,
+                "keywords": keywords_list[idx],
+                **doc.metadata,
+            }
+
+            points.append(PointStruct(
+                id=doc_id,
+                vector={
+                    "dense": embeddings[idx],
+                    "sparse": SparseVector(
+                        indices=sparse_vector.indices,
+                        values=sparse_vector.values,
+                    ),
+                },
+                payload=payload,
+            ))
+
+        return {
+            "batch_id": int(time.time() * 1000),  # Unique ID
+            "points": points,
+            "neo4j_entities": merged_entities,
+            "neo4j_relationships": merged_relationships,
+            "domain": domain,
+        }
+
+    def _extract_worker_pool(self, batches: list[tuple[int, list[Any]]]) -> Any:
+        """Process multiple batches through extract worker pool.
+
+        Args:
+            batches: List of (batch_id, documents) tuples
+
+        Yields:
+            Batch results as they complete
+        """
+        with ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="extract") as executor:
+            # Submit all batches
+            futures = {}
+            for batch_idx, documents in batches:
+                batch_data = [(i, doc) for i, doc in enumerate(documents)]
+                future = executor.submit(self._extract_batch, batch_data)
+                futures[future] = batch_idx
+
+            # Yield results as they complete
+            for future in as_completed(futures):
+                batch_idx = futures[future]
+                try:
+                    result = future.result()
+                    self.extracted_counter.increment(len(result["points"]))
+                    yield batch_idx, result
+                except Exception as e:
+                    logger.error("Extract worker failed for batch %d: %s", batch_idx, e)
+                    self.exceptions.append(e)
