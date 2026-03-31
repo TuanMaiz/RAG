@@ -218,7 +218,7 @@ def select_dataset_interactive(dataset_dir: str = DEFAULT_DATASET_DIR) -> str | 
     print(f"\n{Colors.BLUE}Available datasets in {dataset_dir}:{Colors.RESET}")
     for i, (name, _) in enumerate(datasets, 1):
         print(f"  {i}. {name}")
-    print(f"  0. All datasets")
+    print("  0. All datasets")
 
     choice = input(f"\n{Colors.YELLOW}Select dataset to index [0-{len(datasets)}]:{Colors.RESET} ").strip()
 
