@@ -352,13 +352,10 @@ def retry_with_backoff(
     Returns:
         Operation result, or None if all attempts fail
     """
-    last_error = None
-
     for attempt in range(max_attempts):
         try:
             return operation()
         except Exception as e:
-            last_error = e
             if attempt < max_attempts - 1:
                 wait_time = delay * (2 ** attempt)
                 logger.warning(
