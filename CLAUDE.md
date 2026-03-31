@@ -9,17 +9,20 @@ A Retrieval-Augmented Generation (RAG) system competing in the mtRAG benchmark (
 ## Common Commands
 
 **Run the application:**
+
 ```bash
 uv run python main.py
 # Option 1: Chat mode | Option 2: Process/index documents
 ```
 
 **Start Qdrant (Docker):**
+
 ```bash
 docker run -d -p 6333:6333 qdrant/qdrant
 ```
 
 **Start Neo4j (Docker):**
+
 ```bash
 docker run -d -p 7474:7474 -p 7687:7687 \
   -e NEO4J_AUTH=neo4j/password \
@@ -27,11 +30,13 @@ docker run -d -p 7474:7474 -p 7687:7687 \
 ```
 
 **Reset/clear the vector store:**
+
 ```bash
 uv run python drop_qdrant.py
 ```
 
 **Run mtRAG evaluation:**
+
 ```bash
 uv run python evaluation.py \
   evaluation_dataset/human/RAG.jsonl \
@@ -39,6 +44,7 @@ uv run python evaluation.py \
 ```
 
 **Check Qdrant collection status:**
+
 ```bash
 curl -s http://localhost:6333/collections/rag_documents | python -m json.tool
 ```
@@ -46,6 +52,7 @@ curl -s http://localhost:6333/collections/rag_documents | python -m json.tool
 ## Environment
 
 Create `.env` from `.env.example`:
+
 ```
 # OpenAI / OpenRouter
 OPENAI_API_KEY=sk-or-v1-...
@@ -74,6 +81,7 @@ LOG_FILE=                   # Optional: path to log file
 ## Architecture
 
 ### Complete RAG with Knowledge Graph Data Flow
+
 ```
 1. JSONL files (dataset/) → JSONLLoader → LangChain Documents
 2. Documents → RecursiveCharacterTextSplitter → Chunks (1000 chars, 200 overlap)
@@ -110,6 +118,7 @@ Retrieval:
 **`workflow/indexing.py`**: `load_doc()` recursively finds `*.jsonl` files and splits them. `store_doc()` supports **resume functionality** - detects existing collection, continues from last indexed point, saves progress to `.indexing_progress.json`. Use `resume=False` to force reindex.
 
 **`workflow/generation.py`**: Multi-turn RAG with:
+
 - `should_rewrite()` - LLM judge for context-dependent queries
 - `rewrite_query()` - Rewrites query to be standalone
 - `duplicate_query()` - Returns `"query query"` for better retrieval
@@ -128,23 +137,27 @@ Retrieval:
 ### Knowledge Graph Components
 
 **`graph_stores/neo4j_client.py`**: Neo4j connection and basic CRUD operations.
+
 - `get_driver()` - Get connection singleton
 - `execute_query()` - Run Cypher queries
 - `merge_node()` - Create/update nodes
 - `create_relationship()` - Link nodes
 
 **`workflow/kg_extraction.py`**: LLM-based entity and relationship extraction.
+
 - `extract_entities()` - Extract entities from text
 - `extract_relationships()` - Extract relationships between entities
 - `extract_graph_data()` - Combined extraction
 - `extract_query_entities()` - Extract entities from user queries
 
 **`workflow/graph_retrieval.py`**: Graph-based document retrieval.
+
 - `graph_search()` - Main search, returns document IDs
 - `_find_documents_by_entity()` - Direct entity matching
 - `_expand_entities()` - Relationship traversal for entity expansion
 
 **`workflow/context_fusion.py`**: Merge vector and graph retrieval results.
+
 - `fetch_texts_from_qdrant()` - Fetch actual text by document IDs
 - `fuse_results()` - Merge and deduplicate vector + graph results
 - `format_for_llm()` - Format with [1], [2] citation markers
@@ -152,6 +165,7 @@ Retrieval:
 ### Hybrid Collection Schema
 
 Qdrant collection uses named vectors:
+
 - `dense`: OpenAI embeddings (1536 dims for text-embedding-3-small, 3072 for large)
 - `sparse`: BM25-style sparse vectors with IDF modifier
 
@@ -181,6 +195,7 @@ Points are upserted with both vector types in a single call for hybrid search.
 ### mtRAG Benchmark Context
 
 Key findings from the paper:
+
 - **Query rewriting critical**: R@5 drops 0.89 → 0.47 without it
 - **IDK detection**: ~25% of questions are unanswerable
 - **k=5 retrieval**: Paper uses k=5 (system configured for this)
@@ -190,6 +205,8 @@ Current implementation status in `PROJECT_STATUS.md`.
 
 ## Indexing Notes
 
+### Standard Indexer (`workflow/indexing.py`)
+
 - **Resume enabled by default**: `store_doc()` detects existing collection and continues
 - **Progress file**: `.indexing_progress.json` saved after each batch
 - **Batch size**: Default 350, adjustable via parameter
@@ -198,9 +215,46 @@ Current implementation status in `PROJECT_STATUS.md`.
 - **KG indexing**: When `ENABLE_KG=true`, extracts entities via LLM and stores to Neo4j during indexing
 - **Graceful degradation**: If Neo4j is down, Qdrant indexing continues without error
 
+### Streaming Indexer (`workflow/threading_indexing.py`)
+
+**Experimental** - Significantly faster indexing through parallelism and optimized batch sizing:
+
+- **Optimized LLM batch size**: Calculated from model context window (default: ~500 docs/call vs 10)
+- **Parallel extract workers**: Configurable thread pool (default: 8 workers)
+- **Memory-based backpressure**: Spill-to-disk queue (90% spill, 60% restore hysteresis)
+- **Dual progress bars**: Separate bars for extraction and upsert
+- **Retry logic**: Exponential backoff for Neo4j/Qdrant failures (3 attempts)
+
+**Usage:**
+```bash
+uv run python main.py
+# Choose option 2 for streaming mode
+```
+
+**Configuration:**
+```bash
+# Memory Management
+INDEXING_MAX_MEMORY_GB=4        # Max queue memory before spill
+SPILL_THRESHOLD_PCT=90         # Spill at 90% capacity
+RESTORE_THRESHOLD_PCT=60       # Restore at 60% capacity
+SPILL_PATH=./indexing_spill    # Shelve file location
+
+# Deduplication
+GLOBAL_DEDUP_INTERVAL=10       # Batches between global dedup
+
+# Optimized Batch Size (auto-calculated from model context)
+KG_BATCH_SIZE=500              # Docs per LLM call
+MODEL_TOKEN_LIMIT=128000       # Context window (GPT-4o-mini: 128K)
+AVG_DOC_CHARS=500              # Average chunk size
+SAFETY_MARGIN=0.8              # Use 80% of max tokens
+```
+
+**Performance:** 600k docs from ~500 hours (sequential) to ~2 hours (streaming)
+
 ## Datasets
 
 Located in `dataset/`:
+
 - `clapnq.jsonl` (162 MB) - French Revolution
 - `cloud.jsonl` (126 MB) - IBM Cloud CDN
 - `fiqa.jsonl` (50 MB) - Financial QA
@@ -213,16 +267,19 @@ Total: ~622k chunks after splitting.
 The system uses structured logging with colored console output (`utils/logging_config.py`).
 
 **Log levels**: Set `LOG_LEVEL` in `.env` (default: INFO)
+
 - `INFO` - Clean retrieval summaries during chat
 - `DEBUG` - Full context dumps, query details, entity extraction
 
 **Example output (INFO level)**:
+
 ```
 └─ Mode: Vector + Graph search
 └─ Retrieved: 10 docs | Max score: 0.842
 ```
 
 **Example output (DEBUG level)**:
+
 ```
 ├─ Query: "Who was Napoleon?" (standalone)
 ├─ Graph: found 5 docs
@@ -237,17 +294,20 @@ The system uses structured logging with colored console output (`utils/logging_c
 ## Testing
 
 **Quick KG integration test:**
+
 ```bash
 uv run python test_kg.py
 ```
 
 **Run KG comparison evaluation:**
+
 ```bash
 uv run python compare_kg_evaluation.py
 # Select dataset to compare with/without KG
 ```
 
 **Check Neo4j data:**
+
 ```bash
 # Count entities
 uv run python -c "
@@ -258,6 +318,7 @@ print(f'Entities: {result[0][\"count\"]}')
 ```
 
 **Test individual components:**
+
 ```bash
 # Entity extraction
 uv run python -c "
@@ -277,3 +338,7 @@ from workflow.context_fusion import fetch_texts_from_qdrant
 print(fetch_texts_from_qdrant([1]))
 "
 ```
+
+## TODO:
+
+- Implement: Towards Practical GraphRAG: Efficient Knowledge Graph Construction and Hybrid Retrieval at Scale as module, has env to switch to this beside LLM extract approach
