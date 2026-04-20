@@ -36,6 +36,7 @@ A Retrieval-Augmented Generation (RAG) system using LangChain, OpenAI, Qdrant, a
 | **Hybrid Retrieval**    | Dense + sparse (BM25) with RRF fusion                                     | ✅ **Implemented**    |
 | **Retrieval k**         | Paper uses k=5                                                            | ✅ **Updated to k=5** |
 | **Long-form Answers**   | FANC evaluation: Faithfulness, Appropriateness, Naturalness, Completeness | ✅ **Tuned**          |
+| **Reranking**           | Cross-Encoder for high-precision document ranking (BGE-reranker-v2-m3)   | ✅ **NEW: Integrated** |
 
 ---
 
@@ -57,10 +58,11 @@ project/
 │   └── neo4j_client.py           # Neo4j client (basic CRUD)
 ├── workflow/
 │   ├── indexing.py              # load_doc(), store_doc() + KG indexing
-│   ├── generation.py            # RAG with query rewriting + KG retrieval
+│   ├── generation.py            # RAG with query rewriting + KG retrieval + reranking
 │   ├── memory.py                # ConversationMemory class
 │   ├── prompts.py               # Modularized system prompts + KG extraction
 │   ├── hybrid_retrieval.py      # Dense + sparse BM25 with RRF
+│   ├── reranker.py              # NEW: Cross-Encoder reranking (BAAI/bge-reranker-v2-m3)
 │   ├── kg_extraction.py         # NEW: LLM-based entity/relationship extraction
 │   ├── graph_retrieval.py       # NEW: Graph search by entity
 │   └── context_fusion.py        # NEW: Merge vector + graph results
@@ -75,6 +77,57 @@ project/
 ├── predictions/
 │   └── predictions.jsonl        # Our predictions
 └── .env.example                 # Environment variables template
+```
+
+---
+
+## Reranking Integration (NEW) 🚀
+
+### Architecture
+
+```
+Query → [Query Rewrite] → Hybrid Search (Qdrant: k*2)
+        ↓
+        Fuse with Graph Results (if KG enabled)
+        ↓
+        Rerank with Cross-Encoder (top-k)
+        ↓
+        LLM → Response with citations [1], [2]...
+```
+
+### Implementation Details
+
+**Files:**
+- `workflow/reranker.py` - Cross-Encoder model (BAAI/bge-reranker-v2-m3)
+- `workflow/generation.py` - Integration in `retrieve_with_scores()` and `retrieve_with_kg()`
+
+**Key Points:**
+- ✅ Fetches 2x documents (k * 2) from hybrid search for better reranker input
+- ✅ Cross-Encoder scores documents with query-document pairs `[query, doc_text]`
+- ✅ Returns top-k most relevant documents after reranking
+- ✅ Works seamlessly with KG-enhanced retrieval (reranks fused results)
+- ✅ Configurable via `ENABLE_RERANK` environment variable
+- ✅ Lazy model loading - loads on first use
+
+**Usage Flow:**
+```python
+# In workflow/generation.py
+def retrieve_with_scores(query, history, k=5):
+    # 1. Rewrite query if needed (multi-turn)
+    # 2. Hybrid search: get k*2 docs
+    retrieved_docs, max_score = hybrid_retrieve(duplicated, history=None, k=k * 2)
+    # 3. Rerank: get top-k
+    reranked_docs = rerank_documents(retrieval_query, retrieved_docs, top_k=k)
+    return reranked_docs, max_score
+
+def retrieve_with_kg(query, history, k=5):
+    # 1. Hybrid search: get k*2 docs
+    vector_docs, max_score = hybrid_retrieve(duplicated, history=None, k=k * 2)
+    # 2. Graph search + fusion: get k*2 fused docs
+    fused_docs = fuse_results(vector_docs, graph_doc_ids, k=k * 2)
+    # 3. Rerank: get top-k
+    reranked_docs = rerank_documents(retrieval_query, fused_docs, top_k=k)
+    return reranked_docs, max_score
 ```
 
 ---
@@ -336,20 +389,30 @@ uv run python compare_kg_evaluation.py
 - ✅ **Query Duplication**: `"query query"` for better retrieval
 - ✅ **Conversation Memory**: Tracks full history, uses last 5 for rewriting
 - ✅ **Modularized Prompts**: All prompts in `workflow/prompts.py`
+- ✅ **Reranking**: Cross-Encoder reranking (BAAI/bge-reranker-v2-m3) - NEW
 
-### 6. Memory (`workflow/memory.py`)
+### 6. Reranker (`workflow/reranker.py`) - NEW
+
+- ✅ **Cross-Encoder Reranking**: Uses BAAI/bge-reranker-v2-m3 for high-precision ranking
+- ✅ **Lazy Loading**: Model loads on first use
+- ✅ **Configurable**: Environment variable `ENABLE_RERANK=true/false`
+- ✅ **Integrated Pipeline**: Automatically used after hybrid retrieval and context fusion
+- ✅ **Performance**: Fetches 2x documents for reranking, returns top-k
+
+### 7. Memory (`workflow/memory.py`)
 
 - `ConversationMemory` class with window_size=5
 - Stores full conversation history
 
-### 7. Evaluation (`evaluation.py`)
+### 8. Evaluation (`evaluation.py`)
 
 - Reads mtRAG RAG.jsonl format
 - **Now uses HYBRID retrieval** (was dense-only)
+- **Integrated with Reranker** - applies reranking to final results
 - Generates predictions in mtRAG format
 - Supports dataset selection (clapnq, cloud, fiqa, govt, all)
 
-### 8. Prompts (`workflow/prompts.py`)
+### 9. Prompts (`workflow/prompts.py`)
 
 - ✅ **Modularized** - All prompts in one file
 - ✅ **FANC-optimized** - Citations, completeness, natural tone
@@ -377,6 +440,10 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=password
 NEO4J_DATABASE=neo4j
 ENABLE_KG=true
+
+# Cross-Encoder Reranker (NEW)
+ENABLE_RERANK=true
+RERANK_MODEL_NAME=BAAI/bge-reranker-v2-m3
 ```
 
 ---

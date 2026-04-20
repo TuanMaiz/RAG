@@ -18,6 +18,7 @@ from workflow.prompts import (
     REWRITE_JUDGE_PROMPT,
     RAG_SYSTEM_PROMPT,
 )
+from workflow.reranker import rerank_documents, ENABLE_RERANK
 
 load_dotenv()
 
@@ -43,7 +44,10 @@ def _get_rewrite_llm() -> ChatOpenAI:
     return _rewrite_llm
 
 # IDK Detection settings
-IDK_SCORE_THRESHOLD = 0.5
+# Vector score threshold (usually 0.4-0.6)
+IDK_SCORE_THRESHOLD = float(os.getenv("IDK_SCORE_THRESHOLD", "0.5"))
+# Rerank score threshold (BGE v2 m3 scores are typically > 0 for relevant docs)
+RERANK_SCORE_THRESHOLD = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.0"))
 
 
 def should_rewrite(query: str, history: list[dict[str, str]]) -> bool:
@@ -108,7 +112,7 @@ def retrieve_with_scores(query: str, history: list[dict[str, str]], k: int = 5):
 
     Returns:
         tuple: (docs, max_score) where docs is list of Document objects
-               and max_score is the highest similarity score
+               and max_score is the highest similarity score (vector or rerank)
     """
     # Determine the query to use for retrieval
     retrieval_query = query
@@ -118,11 +122,20 @@ def retrieve_with_scores(query: str, history: list[dict[str, str]], k: int = 5):
     else:
         logger.debug("├─ Query: '%s' (standalone)", query)
 
-    # Duplicate for better retrieval (still helps with hybrid)
+    # Duplicate for better retrieval
     duplicated = duplicate_query(retrieval_query)
 
-    # Use hybrid retrieval
-    return hybrid_retrieve(duplicated, history=None, k=k)
+    # Use hybrid retrieval (fetch more docs for reranking)
+    fetch_k = k * 2 if ENABLE_RERANK else k
+    retrieved_docs, vector_max_score = hybrid_retrieve(duplicated, history=None, k=fetch_k)
+    
+    # Apply reranking if enabled
+    reranked_docs, rerank_max_score = rerank_documents(retrieval_query, retrieved_docs, top_k=k)
+    
+    # Logic: if rerank is enabled, use rerank score for IDK, else use vector score
+    final_score = rerank_max_score if ENABLE_RERANK else vector_max_score
+    
+    return reranked_docs, final_score
 
 
 def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
@@ -139,7 +152,7 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
 
     Returns:
         tuple: (docs, max_score) where docs is list of Document objects
-               and max_score is the highest similarity score
+               and max_score is the highest similarity score (vector or rerank)
     """
     # Determine the query to use for retrieval
     retrieval_query = query
@@ -153,7 +166,8 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
     duplicated = duplicate_query(retrieval_query)
 
     # Vector search (hybrid dense + sparse)
-    vector_docs, max_score = hybrid_retrieve(duplicated, history=None, k=k)
+    fetch_k = k * 2 if ENABLE_RERANK else k
+    vector_docs, vector_max_score = hybrid_retrieve(duplicated, history=None, k=fetch_k)
 
     # Graph search (if enabled)
     graph_doc_ids = []
@@ -161,7 +175,7 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
         try:
             graph_doc_ids = graph_search(
                 query=retrieval_query,
-                title=None,  # No title filter - search across all documents
+                title=None,
                 k=k,
                 expand=True,
                 max_hops=1
@@ -172,11 +186,15 @@ def retrieve_with_kg(query: str, history: list[dict[str, str]], k: int = 5):
             logger.warning("├─ Graph search failed: %s", e)
 
     # Fuse results
-    fused_docs = fuse_results(vector_docs, graph_doc_ids, k=k)
+    fused_docs = fuse_results(vector_docs, graph_doc_ids, k=fetch_k)
+    
+    # Apply reranking
+    reranked_docs, rerank_max_score = rerank_documents(retrieval_query, fused_docs, top_k=k)
 
-    # Track max score from vector search (graph results don't have scores)
-    # This is used for IDK detection
-    return fused_docs, max_score
+    # Use rerank score if enabled, else vector score
+    final_score = rerank_max_score if ENABLE_RERANK else vector_max_score
+    
+    return reranked_docs, final_score
 
 
 def query(query: str, model, memory: ConversationMemory) -> str:
@@ -204,13 +222,15 @@ def query(query: str, model, memory: ConversationMemory) -> str:
         retrieved_docs, max_score = retrieve_with_scores(query, history, k=k)
         logger.info("└─ Mode: Hybrid search (dense + sparse)")
 
-    logger.info("└─ Retrieved: %d docs | Max score: %.3f", len(retrieved_docs), max_score)
-
-    # IDK Detection
-    if max_score < IDK_SCORE_THRESHOLD:
-        logger.warning("└─ IDK triggered: score %.3f < threshold %.3f", max_score, IDK_SCORE_THRESHOLD)
+    # IDK Detection based on the selected scoring method
+    threshold = RERANK_SCORE_THRESHOLD if ENABLE_RERANK else IDK_SCORE_THRESHOLD
+    
+    if max_score < threshold:
+        logger.warning("└─ IDK triggered: score %.3f < threshold %.3f", max_score, threshold)
         memory.add_turn(query, IDK_MESSAGE)
         return IDK_MESSAGE
+
+    logger.info("└─ Retrieved: %d docs | Confidence score: %.3f", len(retrieved_docs), max_score)
 
     # ─── Context (debug level to avoid clutter) ───────────────────────────────
     docs_content = "\n\n".join(
